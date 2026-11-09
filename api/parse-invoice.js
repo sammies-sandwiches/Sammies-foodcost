@@ -24,7 +24,7 @@ module.exports = async function handler(req, res) {
       isPdf
         ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } }
         : { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: base64Data } },
-      { type: 'text', text: 'Parse this restaurant invoice. Return ONLY a JSON object (no markdown) with keys: vendor_name, invoice_number, invoice_date, total_amount, line_items (array of: sku, description, quantity, unit_price, extended_price, unit, is_short, is_credit, inventory_category). TDP lines are discounts — subtract from the item above and do not include as separate line items.' }
+      { type: 'text', text: 'Parse this restaurant invoice. Return ONLY a JSON object (no markdown) with keys: vendor_name, invoice_number, invoice_date, total_amount, line_items (array of: sku, description, quantity, unit_price, extended_price, unit, is_short, is_credit, inventory_category, weight_kg, price_per_kg). TDP lines are discounts — subtract from the item above and do not include as separate line items. For items sold by weight (meat, cheese, produce): if the invoice shows the weight or a price per kg or per lb, set weight_kg to the weight in kilograms and price_per_kg to the net price per kg after any discount (convert lb to kg), and use the whole-item total as unit_price. If the invoice shows no weight, set both to null.' }
     ];
 
     const bodyStr = JSON.stringify({
