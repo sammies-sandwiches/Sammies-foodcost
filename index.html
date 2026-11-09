@@ -671,12 +671,12 @@
   <!-- REPORTS & ANALYTICS VIEW -->
   <div id="view-reports" class="view">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <div><h1 class="page-title">Reports & Analytics</h1><div class="page-sub">Scarborough #1 · Week of Oct 28 – Nov 3, 2025</div></div>
+      <div><h1 class="page-title">Reports & Analytics</h1><div class="page-sub" id="report-sub">Scarborough #1</div></div>
       <div style="display:flex;gap:8px">
         <select id="report-period" onchange="initReports()" class="form-select" style="width:auto;font-size:12px;padding:6px 10px">
-          <option value="week">This Week</option>
-          <option value="month">This Month</option>
-          <option value="quarter">This Quarter</option>
+          <option value="week">Weekly view</option>
+          <option value="month">Monthly view</option>
+          <option value="quarter">Quarterly view</option>
         </select>
         <button class="btn" onclick="exportCSV()" style="background:#f3f4f6;color:#374151;font-size:12px;padding:7px 14px">Export CSV</button>
         <button class="btn btn-primary" onclick="previewEmail()" style="font-size:12px;padding:7px 14px">📧 Preview Monday Email</button>
@@ -707,19 +707,11 @@
     <!-- ROW 2: Trend line + Vendor comparison -->
     <div class="two-col" style="margin-bottom:14px">
       <div class="card card-pad">
-        <h2>Weekly spend trend</h2>
+        <h2 id="trend-title">Weekly spend trend</h2>
         <div style="position:relative;height:200px"><canvas id="chart-trend"></canvas></div>
       </div>
       <div class="card card-pad">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-          <h2 style="margin:0">Vendor price comparison</h2>
-          <select id="vendor-item-select" onchange="renderVendorChart()" class="form-select" style="width:auto;font-size:11px;padding:4px 8px">
-            <option value="ribeye">Ribeye Steak</option>
-            <option value="chicken">Chicken Breast</option>
-            <option value="tomato">Beefsteak Tomato</option>
-            <option value="butter">Unsalted Butter</option>
-          </select>
-        </div>
+        <h2>Ingredient price changes</h2>
         <div style="position:relative;height:200px"><canvas id="chart-vendor"></canvas></div>
       </div>
     </div>
@@ -738,7 +730,7 @@
           <tbody id="credits-table"></tbody>
         </table>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6;display:flex;justify-content:space-between;font-size:12px">
-          <span style="color:#9ca3af">Total unresolved credits</span>
+          <span style="color:#9ca3af">Total open credits & shorts</span>
           <span style="font-weight:600;color:#dc2626" id="credits-total"></span>
         </div>
       </div>
@@ -746,6 +738,7 @@
         <h2>Food cost % vs budget</h2>
         <div style="position:relative;height:180px"><canvas id="chart-budget"></canvas></div>
         <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px" id="budget-summary"></div>
+        <div style="font-size:10px;color:#9ca3af;margin-top:8px">Food cost counts only the ingredients entered in each recipe. Sauces and preps that are not costed yet are left out, so some items read lower than they really are.</div>
       </div>
     </div>
 
@@ -1133,6 +1126,8 @@ function syncFromSupabase() {
           if (dbPrice > 0 && dbPrice < localPrice * 10 && dbPrice > localPrice / 10) {
             existing.price = dbPrice;
             existing.prev = parseFloat(row.prev_price);
+            // Keep recipe costing in step with the price loaded from the database
+            ORIGINAL_PRICES[existing.id] = dbPrice;
           }
           existing._edited=row.edited;
           existing.packQty=row.case_size||null;
@@ -1380,7 +1375,7 @@ function deleteRecipeFromDb(id) {
 
 
 const ING=[
-  {id:1,sku:'44801',name:'Ribeye Steak',vendor:'Costco',unit:'kg',price:39.68,prev:36.38,cat:'Protein'},
+  {id:1,sku:'44801',name:'Ribeye Steak',vendor:'Costco',unit:'kg',price:34.99,prev:39.68,cat:'Protein'},
   {id:2,sku:'10026',name:'Montreal Smoked Turkey',vendor:'Costco',unit:'kg',price:12.32,prev:12.32,cat:'Protein'},
   {id:3,sku:'878199',name:'Organic Arugula',vendor:'Costco',unit:'100g',price:1.09,prev:0.99,cat:'Produce'},
   {id:4,sku:'1021015',name:'Cucumber',vendor:'Costco',unit:'each',price:0.42,prev:0.42,cat:'Produce'},
@@ -2992,7 +2987,7 @@ function printReceivingChecklist() {
 function buildEmailHtml() {
   const mi = recipes.filter(r => !r.isBatch && r.sell > 0);
   const avgFC = mi.reduce((s,r)=>s+fcPct(calcCost(r),r.sell),0)/mi.length;
-  const alerts = ING.filter(i=>i.price>i.prev);
+  const alerts = priceChanges().filter(i=>i.price>i.prev);
   const unres = CREDITS_DATA.filter(c=>c.status!=='Resolved');
   const creditTotal = unres.reduce((s,c)=>s+c.amount,0);
   const thisW = Object.keys(COLORS).reduce((s,cat)=>s+(SPEND_HISTORY[cat]||[0,0,0,0,0])[4],0);
@@ -3101,6 +3096,10 @@ function buildEmailHtml() {
   return html;
 }
 function previewEmail(){
+  loadReportInvoices(function(){ computeReportData(); previewEmailNow(); });
+}
+
+function previewEmailNow(){
   var html=buildEmailHtml();
   var preview=document.getElementById('email-preview-body');
   preview.innerHTML='<iframe id="email-iframe" style="width:100%;border:none;min-height:600px"></iframe>';
@@ -3123,150 +3122,351 @@ function copyEmailHtml(){
 
 function closeEmailModal(){document.getElementById('email-modal').style.display='none';}
 
-// ── REPORTS DATA ─────────────────────────────────────────────────────────────
+// ── REPORTS (built from your saved invoices, recipes and ingredient prices) ───
+const BUDGET_FC = 27;   // food cost % target line
+
 const COLORS = {
   Protein:'#ef4444', Produce:'#22c55e', Dairy:'#f59e0b', 'Dry Goods':'#8b5cf6',
   Beverage:'#06b6d4', Bakery:'#f97316', Frozen:'#64748b', Chemical:'#ec4899',
   'Paper/Disposables':'#14b8a6', Other:'#94a3b8'
 };
 
-const SPEND_HISTORY = {
-  Protein:[1200,1350,1280,1420,1380],
-  Produce:[320,290,340,310,360],
-  Dairy:[180,200,175,220,190],
-  'Dry Goods':[140,160,130,150,145],
-  Beverage:[80,90,75,85,95],
-  Bakery:[60,70,65,55,72],
-  Frozen:[50,45,60,40,55],
-  Chemical:[30,35,28,32,38],
-  'Paper/Disposables':[25,28,22,30,26],
-  Other:[20,18,25,15,22]
-};
+var REPORT_INVOICES = [];
+var REPORT_VENDORS = [];
+var REPORT_META = { count:0, anchor:null, days:7, mode:'week' };
+var SPEND_HISTORY = { labels:[] };
+var CREDITS_DATA = [];
+var chartInstances = {};
+var spendChartType = 'bar';
 
-const VENDOR_HISTORY = {
-  Costco:{ shorts:2, credits:1, lateDeliveries:0, totalOrders:12 },
-  Sysco:{ shorts:1, credits:0, lateDeliveries:1, totalOrders:8 },
-  Market:{ shorts:0, credits:0, lateDeliveries:0, totalOrders:20 }
-};
+function destroyChart(key){
+  if(chartInstances[key]){ chartInstances[key].destroy(); chartInstances[key] = null; }
+}
 
-const BUDGET = {
-  Protein:1500, Produce:400, Dairy:250, 'Dry Goods':200,
-  Beverage:100, Bakery:80, Frozen:70, Chemical:50,
-  'Paper/Disposables':40, Other:30
-};
+function setChartEmpty(id, msg){
+  var cv = document.getElementById(id);
+  if(!cv) return false;
+  var wrap = cv.parentNode;
+  var note = wrap.querySelector('.chart-empty');
+  if(msg){
+    cv.style.display = 'none';
+    if(!note){
+      note = document.createElement('div');
+      note.className = 'chart-empty';
+      note.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;color:#9ca3af;padding:0 24px';
+      wrap.appendChild(note);
+    }
+    note.textContent = msg;
+  } else {
+    cv.style.display = '';
+    if(note) note.remove();
+  }
+  return !!msg;
+}
 
-function initReports(){
-  if(typeof Chart==='undefined'){ setTimeout(initReports,200); return; }
-  renderKPIs();
-  renderSpendChart('bar');
-  renderFCChart();
-  renderTrendChart();
-  renderVendorChart();
-  renderCredits();
-  renderBudgetChart();
-  renderVendorTable();
+function money(n){ return '$' + (Math.round(n * 100) / 100).toLocaleString('en-CA', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+
+function reportCategory(cat){ return COLORS[cat] ? cat : 'Other'; }
+
+function lineAmount(l){
+  var e = parseFloat(l.extended_price);
+  if(!isNaN(e)) return e;
+  return (parseFloat(l.quantity) || 0) * (parseFloat(l.unit_price) || 0);
+}
+
+function invoiceDate(inv){
+  var d = inv.invoice_date || inv.parsed_at;
+  var t = d ? new Date(d) : null;
+  return (t && !isNaN(t.getTime())) ? t : null;
+}
+
+function shortDate(d){
+  return d.toLocaleDateString('en-CA', {month:'short', day:'numeric', timeZone:'UTC'});
+}
+
+function menuItemsFC(){
+  return recipes.filter(function(r){ return !r.isBatch && r.sell > 0; }).map(function(r){
+    var cost = calcCost(r);
+    return { name:r.name, cost:cost, sell:r.sell, fc:fcPct(cost, r.sell) };
+  });
+}
+
+// Ingredients whose price was changed through the app (edit or invoice)
+function priceChanges(){
+  return ING.filter(function(i){ return i._edited && i.prev > 0 && i.price !== i.prev; });
+}
+
+function loadReportInvoices(cb){
+  if(!sb){ REPORT_INVOICES = []; cb(); return; }
+  sb.from('invoices')
+    .select('id,vendor,invoice_number,invoice_date,total_amount,raw_json,parsed_at')
+    .order('invoice_date', {ascending:true}).limit(1000)
+    .then(function(res){ REPORT_INVOICES = (res && res.data) || []; cb(); })
+    .catch(function(){ REPORT_INVOICES = []; cb(); });
+}
+
+// Turn the saved invoices into spend by category / period, credits & shorts, and vendor totals
+function computeReportData(){
+  var sel = document.getElementById('report-period');
+  var mode = sel ? sel.value : 'week';
+  var days = mode === 'quarter' ? 91 : mode === 'month' ? 30 : 7;
+  var DAY = 86400000;
+  var rows = REPORT_INVOICES.map(function(inv){ return { inv:inv, d:invoiceDate(inv) }; });
+  var times = rows.filter(function(x){ return x.d; }).map(function(x){ return x.d.getTime(); });
+  var anchor = times.length ? new Date(Math.max.apply(null, times)) : new Date();
+  var endMs = Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate()) + DAY;
+
+  var labels = [];
+  for(var i = 4; i >= 0; i--){ labels.push(shortDate(new Date(endMs - i * days * DAY - DAY))); }
+  var hist = { labels:labels };
+  Object.keys(COLORS).forEach(function(c){ hist[c] = [0,0,0,0,0]; });
+
+  var credits = [];
+  var vend = {};
+  rows.forEach(function(x){
+    var inv = x.inv;
+    var idx = x.d ? 4 - Math.floor((endMs - 1 - x.d.getTime()) / (days * DAY)) : -1;
+    var lines = (inv.raw_json && inv.raw_json.line_items) || [];
+    var vname = inv.vendor || 'Unknown';
+    var v = vend[vname] || (vend[vname] = { name:vname, invoices:0, spend:0, shorts:0, shortVal:0 });
+    v.invoices++;
+    lines.forEach(function(l){
+      var amt = lineAmount(l);
+      if(l.is_credit || l.is_short){
+        var abs = Math.abs(amt) || Math.abs((parseFloat(l.unit_price) || 0) * (parseFloat(l.quantity) || 0));
+        credits.push({ item:l.description || 'Item', vendor:vname, invoice:inv.invoice_number || '—',
+                       type:l.is_short ? 'Short' : 'Credit', amount:abs, status:'Open' });
+        if(l.is_short){ v.shorts++; v.shortVal += abs; }
+        return;
+      }
+      v.spend += amt;
+      if(idx >= 0 && idx <= 4){ hist[reportCategory(l.inventory_category)][idx] += amt; }
+    });
+  });
+
+  SPEND_HISTORY = hist;
+  CREDITS_DATA = credits;
+  REPORT_VENDORS = Object.keys(vend).map(function(k){ return vend[k]; });
+  REPORT_META = { count:rows.length, anchor:times.length ? anchor : null, days:days, mode:mode };
+}
+
+function periodTotals(){
+  var cats = Object.keys(COLORS);
+  var thisW = cats.reduce(function(s, c){ return s + (SPEND_HISTORY[c] || [0,0,0,0,0])[4]; }, 0);
+  var lastW = cats.reduce(function(s, c){ return s + (SPEND_HISTORY[c] || [0,0,0,0,0])[3]; }, 0);
+  return { thisW:thisW, lastW:lastW };
+}
+
+function renderReportHeader(){
+  var el = document.getElementById('report-sub');
+  if(!el) return;
+  var n = REPORT_META.count;
+  if(!n){ el.textContent = 'Scarborough #1 · No invoices saved yet'; return; }
+  var latest = REPORT_META.anchor ? REPORT_META.anchor.toLocaleDateString('en-CA', {year:'numeric', month:'short', day:'numeric', timeZone:'UTC'}) : 'unknown date';
+  el.textContent = 'Scarborough #1 · ' + n + ' invoice' + (n === 1 ? '' : 's') + ' on file · latest ' + latest;
+  var t = document.getElementById('trend-title');
+  if(t) t.textContent = (REPORT_META.mode === 'quarter' ? 'Quarterly' : REPORT_META.mode === 'month' ? 'Monthly' : 'Weekly') + ' spend trend';
 }
 
 function renderKPIs(){
-  var mi=recipes.filter(function(r){return !r.isBatch&&r.sell>0;});
-  var avgFC=mi.reduce(function(s,r){return s+fcPct(calcCost(r),r.sell);},0)/mi.length;
-  var thisW=Object.keys(COLORS).reduce(function(s,cat){return s+(SPEND_HISTORY[cat]||[0,0,0,0,0])[4];},0);
-  var lastW=Object.keys(COLORS).reduce(function(s,cat){return s+(SPEND_HISTORY[cat]||[0,0,0,0,0])[3];},0);
-  var diff=((thisW-lastW)/lastW*100);
-  var unres=CREDITS_DATA.filter(function(c){return c.status!=='Resolved';});
-  var credT=unres.reduce(function(s,c){return s+c.amount;},0);
-  var alerts=ING.filter(function(i){return i.price>i.prev;}).length;
-  document.getElementById('report-kpis').innerHTML=[
-    {label:'Avg food cost %',val:avgFC.toFixed(1)+'%',sub:avgFC<=BUDGET_FC?'✓ Under '+BUDGET_FC+'% target':'⚠ Over budget',sc:avgFC<=BUDGET_FC?'#16a34a':'#dc2626'},
-    {label:'Weekly food spend',val:'$'+Math.round(thisW).toLocaleString(),sub:(diff>=0?'↑':'↓')+Math.abs(diff).toFixed(1)+'% vs last week',sc:diff>5?'#dc2626':diff<0?'#16a34a':'#9ca3af'},
-    {label:'Unresolved credits',val:'$'+credT.toFixed(2),sub:unres.length+' items pending',sc:unres.length>0?'#dc2626':'#16a34a'},
-    {label:'Price alerts',val:alerts,sub:'Ingredients up since last invoice',sc:alerts>0?'#d97706':'#16a34a'},
-  ].map(function(s){return '<div class="stat-card"><div class="stat-label">'+s.label+'</div><div class="stat-val">'+s.val+'</div><div class="stat-sub" style="color:'+s.sc+'">'+s.sub+'</div></div>';}).join('');
+  var items = menuItemsFC();
+  var avgFC = items.length ? items.reduce(function(s, m){ return s + m.fc; }, 0) / items.length : null;
+  var tot = periodTotals();
+  var diff = tot.lastW > 0 ? ((tot.thisW - tot.lastW) / tot.lastW * 100) : null;
+  var open = CREDITS_DATA.filter(function(c){ return c.status !== 'Resolved'; });
+  var openT = open.reduce(function(s, c){ return s + c.amount; }, 0);
+  var changes = priceChanges();
+  var up = changes.filter(function(i){ return i.price > i.prev; }).length;
+  var spendLabel = 'Spend, ' + REPORT_META.days + ' days' + (REPORT_META.anchor ? ' to ' + SPEND_HISTORY.labels[4] : '');
+  var cards = [
+    { label:'Avg food cost %',
+      val: avgFC === null ? '—' : avgFC.toFixed(1) + '%',
+      sub: avgFC === null ? 'No menu items yet' : (avgFC <= BUDGET_FC ? '✓ At or under the ' + BUDGET_FC + '% target' : '⚠ ' + (avgFC - BUDGET_FC).toFixed(1) + ' pts over the ' + BUDGET_FC + '% target'),
+      sc: avgFC === null ? '#9ca3af' : (avgFC <= BUDGET_FC ? '#16a34a' : '#dc2626') },
+    { label: spendLabel,
+      val: money(tot.thisW),
+      sub: diff === null ? 'No earlier period to compare' : (diff >= 0 ? '↑' : '↓') + Math.abs(diff).toFixed(1) + '% vs previous period',
+      sc: diff === null ? '#9ca3af' : (diff > 5 ? '#dc2626' : diff < 0 ? '#16a34a' : '#9ca3af') },
+    { label:'Open credits & shorts',
+      val: money(openT),
+      sub: open.length + ' item' + (open.length === 1 ? '' : 's') + ' from invoices',
+      sc: open.length > 0 ? '#dc2626' : '#16a34a' },
+    { label:'Price changes',
+      val: changes.length,
+      sub: changes.length ? up + ' up, ' + (changes.length - up) + ' down' : 'Shows edits and invoice updates',
+      sc: up > 0 ? '#d97706' : '#9ca3af' }
+  ];
+  document.getElementById('report-kpis').innerHTML = cards.map(function(s){
+    return '<div class="stat-card"><div class="stat-label">' + s.label + '</div><div class="stat-val">' + s.val + '</div><div class="stat-sub" style="color:' + s.sc + '">' + s.sub + '</div></div>';
+  }).join('');
 }
 
-var spendChartType='bar';
-function setSpendChart(type,el){
-  spendChartType=type;
-  document.querySelectorAll('#spend-bar-btn,#spend-pie-btn').forEach(function(b){b.classList.remove('active');});
+function setSpendChart(type, el){
+  spendChartType = type;
+  document.querySelectorAll('#spend-bar-btn,#spend-pie-btn').forEach(function(b){ b.classList.remove('active'); });
   el.classList.add('active');
   renderSpendChart(type);
 }
 
 function renderSpendChart(type){
   destroyChart('spend');
-  var ctx=document.getElementById('chart-spend').getContext('2d');
-  var cats=Object.keys(COLORS);
-  var vals=cats.map(function(cat){return (SPEND_HISTORY[cat]||[0,0,0,0,0])[4];});
-  if(type==='pie'){
-    chartInstances.spend=new Chart(ctx,{type:'doughnut',data:{labels:cats,datasets:[{data:vals,backgroundColor:cats.map(function(c){return COLORS[c];}),borderWidth:2,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{font:{size:11},padding:8}}}}});
+  var cats = Object.keys(COLORS).filter(function(c){ return (SPEND_HISTORY[c] || [0,0,0,0,0])[4] > 0; });
+  if(setChartEmpty('chart-spend', cats.length ? null : 'No invoice spend in this period yet. Scan an invoice to see it here.')) return;
+  var vals = cats.map(function(c){ return Math.round(SPEND_HISTORY[c][4] * 100) / 100; });
+  var ctx = document.getElementById('chart-spend').getContext('2d');
+  if(type === 'pie'){
+    chartInstances.spend = new Chart(ctx, { type:'doughnut',
+      data:{ labels:cats, datasets:[{ data:vals, backgroundColor:cats.map(function(c){ return COLORS[c]; }), borderWidth:2, borderColor:'#fff' }] },
+      options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'right', labels:{ font:{ size:11 }, padding:8 } },
+        tooltip:{ callbacks:{ label:function(c){ return ' ' + c.label + ': ' + money(c.parsed); } } } } } });
   } else {
-    chartInstances.spend=new Chart(ctx,{type:'bar',data:{labels:cats,datasets:[{data:vals,backgroundColor:cats.map(function(c){return COLORS[c];}),borderRadius:4,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{callback:function(v){return '$'+v;},font:{size:10}},grid:{color:'#f3f4f6'}},x:{ticks:{font:{size:10}},grid:{display:false}}}}});
+    chartInstances.spend = new Chart(ctx, { type:'bar',
+      data:{ labels:cats, datasets:[{ data:vals, backgroundColor:cats.map(function(c){ return COLORS[c]; }), borderRadius:4, borderSkipped:false }] },
+      options:{ responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:function(c){ return ' ' + money(c.parsed.y); } } } },
+        scales:{ y:{ beginAtZero:true, ticks:{ callback:function(v){ return '$' + v; }, font:{ size:10 } }, grid:{ color:'#f3f4f6' } },
+                 x:{ ticks:{ font:{ size:10 } }, grid:{ display:false } } } } });
   }
 }
 
+// Draws a dashed vertical line at the food cost target on a horizontal bar chart
+var targetLinePlugin = {
+  id:'targetLine',
+  afterDatasetsDraw:function(chart, args, opts){
+    var x = chart.scales.x;
+    if(!x || !opts) return;
+    var px = x.getPixelForValue(opts.value);
+    var a = chart.chartArea, ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(px, a.top); ctx.lineTo(px, a.bottom); ctx.stroke();
+    ctx.setLineDash([]); ctx.fillStyle = '#2563eb'; ctx.font = '600 10px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(opts.label, px, a.top - 5);
+    ctx.restore();
+  }
+};
+
 function renderFCChart(){
   destroyChart('fc');
-  var mi=recipes.filter(function(r){return !r.isBatch&&r.sell>0;}).slice(0,10);
-  var labels=mi.map(function(r){return r.name.length>18?r.name.slice(0,16)+'…':r.name;});
-  var vals=mi.map(function(r){return parseFloat(fcPct(calcCost(r),r.sell).toFixed(1));});
-  var colors=vals.map(function(v){return v<=25?'#5BAD6F':v<=32?'#E8A838':'#E85D30';});
-  var ctx=document.getElementById('chart-fc').getContext('2d');
-  chartInstances.fc=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[{data:vals,backgroundColor:colors,borderRadius:4,borderSkipped:false},{data:Array(labels.length).fill(BUDGET_FC),type:'line',borderColor:'#94a3b8',borderDash:[4,4],borderWidth:1.5,pointRadius:0,label:'Budget'}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,max:55,ticks:{callback:function(v){return v+'%';},font:{size:10}},grid:{color:'#f3f4f6'}},y:{ticks:{font:{size:10}},grid:{display:false}}}}});
+  var items = menuItemsFC().sort(function(a, b){ return b.fc - a.fc; });
+  var wrap = document.getElementById('chart-fc').parentNode;
+  if(setChartEmpty('chart-fc', items.length ? null : 'No menu items with a sell price yet.')) return;
+  wrap.style.height = Math.max(220, items.length * 24 + 56) + 'px';
+  var labels = items.map(function(m){ return m.name.length > 24 ? m.name.slice(0, 22) + '…' : m.name; });
+  var vals = items.map(function(m){ return parseFloat(m.fc.toFixed(1)); });
+  var colors = vals.map(function(v){ return v <= BUDGET_FC ? '#5BAD6F' : v <= BUDGET_FC + 5 ? '#E8A838' : '#E85D30'; });
+  var top = Math.max.apply(null, vals);
+  var ctx = document.getElementById('chart-fc').getContext('2d');
+  chartInstances.fc = new Chart(ctx, { type:'bar',
+    data:{ labels:labels, datasets:[{ data:vals, backgroundColor:colors, borderRadius:3, borderSkipped:false }] },
+    options:{ indexAxis:'y', responsive:true, maintainAspectRatio:false, layout:{ padding:{ top:16, right:8 } },
+      plugins:{ legend:{ display:false }, targetLine:{ value:BUDGET_FC, label:BUDGET_FC + '% target' },
+        tooltip:{ callbacks:{ label:function(c){ return ' ' + c.parsed.x + '% food cost'; } } } },
+      scales:{ x:{ beginAtZero:true, suggestedMax:Math.max(40, Math.ceil(top / 10) * 10), ticks:{ callback:function(v){ return v + '%'; }, font:{ size:10 } }, grid:{ color:'#f3f4f6' } },
+               y:{ ticks:{ font:{ size:10 } }, grid:{ display:false } } } },
+    plugins:[targetLinePlugin] });
 }
 
 function renderTrendChart(){
   destroyChart('trend');
-  var ctx=document.getElementById('chart-trend').getContext('2d');
-  var cats=['Protein','Produce','Dairy'];
-  chartInstances.trend=new Chart(ctx,{type:'line',data:{labels:SPEND_HISTORY.labels,datasets:cats.map(function(cat){return {label:cat,data:SPEND_HISTORY[cat],borderColor:COLORS[cat],backgroundColor:COLORS[cat]+'22',borderWidth:2,pointRadius:3,tension:0.3,fill:false};})},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'top',labels:{font:{size:10},padding:8,boxWidth:10}}},scales:{y:{beginAtZero:false,ticks:{callback:function(v){return '$'+v;},font:{size:10}},grid:{color:'#f3f4f6'}},x:{ticks:{font:{size:10}},grid:{display:false}}}}});
+  var cats = Object.keys(COLORS);
+  var totals = SPEND_HISTORY.labels.map(function(l, i){ return cats.reduce(function(s, c){ return s + (SPEND_HISTORY[c] || [0,0,0,0,0])[i]; }, 0); });
+  var any = totals.some(function(t){ return t > 0; });
+  if(setChartEmpty('chart-trend', any ? null : 'No invoice spend in this range yet. Scan invoices to see the trend.')) return;
+  var top3 = cats.slice().sort(function(a, b){
+    var sa = SPEND_HISTORY[a].reduce(function(s, v){ return s + v; }, 0);
+    var sb2 = SPEND_HISTORY[b].reduce(function(s, v){ return s + v; }, 0);
+    return sb2 - sa;
+  }).slice(0, 3).filter(function(c){ return SPEND_HISTORY[c].some(function(v){ return v > 0; }); });
+  var sets = [{ label:'Total', data:totals.map(function(v){ return Math.round(v * 100) / 100; }), borderColor:'#111827', backgroundColor:'#11182722', borderWidth:2.5, pointRadius:3, tension:0.3, fill:false }]
+    .concat(top3.map(function(c){
+      return { label:c, data:SPEND_HISTORY[c].map(function(v){ return Math.round(v * 100) / 100; }), borderColor:COLORS[c], backgroundColor:COLORS[c] + '22', borderWidth:2, pointRadius:3, tension:0.3, fill:false };
+    }));
+  var ctx = document.getElementById('chart-trend').getContext('2d');
+  chartInstances.trend = new Chart(ctx, { type:'line', data:{ labels:SPEND_HISTORY.labels, datasets:sets },
+    options:{ responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ position:'top', labels:{ font:{ size:10 }, padding:8, boxWidth:10 } },
+        tooltip:{ callbacks:{ label:function(c){ return ' ' + c.dataset.label + ': ' + money(c.parsed.y); } } } },
+      scales:{ y:{ beginAtZero:true, ticks:{ callback:function(v){ return '$' + v; }, font:{ size:10 } }, grid:{ color:'#f3f4f6' } },
+               x:{ ticks:{ font:{ size:10 } }, grid:{ display:false } } } } });
 }
 
+// Ingredient price changes made through the app (edits and invoice updates)
 function renderVendorChart(){
   destroyChart('vendor');
-  var key=document.getElementById('vendor-item-select').value;
-  var d=VENDOR_PRICES[key];
-  var vendorColors=['#5B9BD5','#E85D30','#5BAD6F','#A78BFA'];
-  var vendors=Object.keys(d).filter(function(k){return k!=='labels';});
-  var ctx=document.getElementById('chart-vendor').getContext('2d');
-  chartInstances.vendor=new Chart(ctx,{type:'line',data:{labels:d.labels,datasets:vendors.map(function(v,i){return {label:v,data:d[v],borderColor:vendorColors[i],backgroundColor:vendorColors[i]+'22',borderWidth:2,pointRadius:4,tension:0.2,fill:false};})},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'top',labels:{font:{size:10},padding:8,boxWidth:10}}},scales:{y:{ticks:{callback:function(v){return '$'+v.toFixed(2);},font:{size:10}},grid:{color:'#f3f4f6'}},x:{ticks:{font:{size:10}},grid:{display:false}}}}});
+  var list = priceChanges().map(function(i){
+    return { name:i.name, pct:(i.price - i.prev) / i.prev * 100 };
+  }).sort(function(a, b){ return Math.abs(b.pct) - Math.abs(a.pct); }).slice(0, 8);
+  if(setChartEmpty('chart-vendor', list.length ? null : 'No price changes yet. They show up when you edit a price or apply an invoice.')) return;
+  var ctx = document.getElementById('chart-vendor').getContext('2d');
+  chartInstances.vendor = new Chart(ctx, { type:'bar',
+    data:{ labels:list.map(function(l){ return l.name.length > 22 ? l.name.slice(0, 20) + '…' : l.name; }),
+           datasets:[{ data:list.map(function(l){ return parseFloat(l.pct.toFixed(1)); }),
+                       backgroundColor:list.map(function(l){ return l.pct > 0 ? '#E85D30' : '#5BAD6F'; }), borderRadius:3, borderSkipped:false }] },
+    options:{ indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:function(c){ return ' ' + (c.parsed.x > 0 ? '+' : '') + c.parsed.x + '%'; } } } },
+      scales:{ x:{ ticks:{ callback:function(v){ return v + '%'; }, font:{ size:10 } }, grid:{ color:'#f3f4f6' } },
+               y:{ ticks:{ font:{ size:10 } }, grid:{ display:false } } } } });
 }
 
 function renderCredits(){
-  var unres=CREDITS_DATA.filter(function(c){return c.status!=='Resolved';});
-  document.getElementById('credits-badge').textContent=unres.length+' unresolved';
-  document.getElementById('credits-table').innerHTML=CREDITS_DATA.map(function(c){
-    var sc=c.status==='Resolved'?'badge-green':c.status==='Unresolved'?'badge-red':'badge-amber';
-    return '<tr><td style="font-weight:500">'+c.item+'</td><td><span class="vendor-pill">'+c.vendor+'</span></td><td style="color:#9ca3af;font-family:monospace;font-size:10px">'+c.invoice+'</td><td style="color:#6b7280">'+c.type+'</td><td style="font-weight:500;color:'+(c.status==='Resolved'?'#9ca3af':'#dc2626')+'">$'+c.amount.toFixed(2)+'</td><td><span class="badge '+sc+'">'+c.status+'</span></td></tr>';
-  }).join('');
-  document.getElementById('credits-total').textContent='$'+unres.reduce(function(s,c){return s+c.amount;},0).toFixed(2);
+  var open = CREDITS_DATA.filter(function(c){ return c.status !== 'Resolved'; });
+  document.getElementById('credits-badge').textContent = open.length + ' open';
+  document.getElementById('credits-table').innerHTML = CREDITS_DATA.length ? CREDITS_DATA.map(function(c){
+    var sc = c.status === 'Resolved' ? 'badge-green' : 'badge-amber';
+    return '<tr><td style="font-weight:500">' + c.item + '</td><td><span class="vendor-pill">' + c.vendor + '</span></td><td style="color:#9ca3af;font-family:monospace;font-size:10px">' + c.invoice + '</td><td style="color:#6b7280">' + c.type + '</td><td style="font-weight:500;color:' + (c.status === 'Resolved' ? '#9ca3af' : '#dc2626') + '">' + money(c.amount) + '</td><td><span class="badge ' + sc + '">' + c.status + '</span></td></tr>';
+  }).join('') : '<tr><td colspan="6" style="color:#9ca3af;font-size:12px;padding:14px 0">No shorts or credits on your saved invoices.</td></tr>';
+  document.getElementById('credits-total').textContent = money(open.reduce(function(s, c){ return s + c.amount; }, 0));
 }
 
 function renderBudgetChart(){
   destroyChart('budget');
-  var mi=recipes.filter(function(r){return !r.isBatch&&r.sell>0;});
-  var actual=parseFloat((mi.reduce(function(s,r){return s+fcPct(calcCost(r),r.sell);},0)/mi.length).toFixed(1));
-  var prior=parseFloat((actual-1.8).toFixed(1));
-  var ctx=document.getElementById('chart-budget').getContext('2d');
-  chartInstances.budget=new Chart(ctx,{type:'bar',data:{labels:['Prior Period','This Period','Budget Target'],datasets:[{data:[prior,actual,BUDGET_FC],backgroundColor:[prior<=BUDGET_FC?'#5BAD6F':'#E85D30',actual<=BUDGET_FC?'#5BAD6F':'#E85D30','#5B9BD5'],borderRadius:6,borderSkipped:false}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,max:50,ticks:{callback:function(v){return v+'%';},font:{size:10}},grid:{color:'#f3f4f6'}},x:{ticks:{font:{size:10}},grid:{display:false}}}}});
-  var diff=actual-prior;
-  document.getElementById('budget-summary').innerHTML=[
-    {l:'Prior',v:prior+'%',c:'#9ca3af'},
-    {l:'Actual',v:actual+'%',c:actual<=BUDGET_FC?'#16a34a':'#dc2626'},
-    {l:'vs Prior',v:(diff>=0?'+':'')+diff.toFixed(1)+'%',c:diff>0?'#dc2626':'#16a34a'},
-  ].map(function(s){return '<div style="text-align:center;background:#f9fafb;border-radius:8px;padding:8px"><div style="font-size:10px;color:#9ca3af">'+s.l+'</div><div style="font-size:15px;font-weight:600;color:'+s.c+'">'+s.v+'</div></div>';}).join('');
+  var items = menuItemsFC();
+  var summary = document.getElementById('budget-summary');
+  if(setChartEmpty('chart-budget', items.length ? null : 'No menu items with a sell price yet.')){ summary.innerHTML = ''; return; }
+  var avg = parseFloat((items.reduce(function(s, m){ return s + m.fc; }, 0) / items.length).toFixed(1));
+  var over = items.filter(function(m){ return m.fc > BUDGET_FC; }).length;
+  var ctx = document.getElementById('chart-budget').getContext('2d');
+  chartInstances.budget = new Chart(ctx, { type:'bar',
+    data:{ labels:['Menu average', 'Target'], datasets:[{ data:[avg, BUDGET_FC], backgroundColor:[avg <= BUDGET_FC ? '#5BAD6F' : '#E85D30', '#5B9BD5'], borderRadius:6, borderSkipped:false }] },
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ display:false } },
+      scales:{ y:{ beginAtZero:true, suggestedMax:40, ticks:{ callback:function(v){ return v + '%'; }, font:{ size:10 } }, grid:{ color:'#f3f4f6' } },
+               x:{ ticks:{ font:{ size:10 } }, grid:{ display:false } } } } });
+  summary.innerHTML = [
+    { l:'Menu average', v:avg + '%', c:avg <= BUDGET_FC ? '#16a34a' : '#dc2626' },
+    { l:'Target', v:BUDGET_FC + '%', c:'#2563eb' },
+    { l:'Over target', v:over + ' of ' + items.length, c:over > 0 ? '#dc2626' : '#16a34a' }
+  ].map(function(s){
+    return '<div style="text-align:center;background:#f9fafb;border-radius:8px;padding:8px"><div style="font-size:10px;color:#9ca3af">' + s.l + '</div><div style="font-size:15px;font-weight:600;color:' + s.c + '">' + s.v + '</div></div>';
+  }).join('');
 }
 
 function renderVendorTable(){
-  var vendors=[
-    {name:'Costco',invoices:4,spend:1420.50,shorts:3,shortVal:54.99,priceInc:2},
-    {name:'Sysco',invoices:3,spend:986.20,shorts:1,shortVal:24.95,priceInc:4},
-    {name:'Market',invoices:8,spend:540.00,shorts:0,shortVal:0,priceInc:6},
-  ];
-  document.getElementById('vendor-table').innerHTML=vendors.map(function(v){
-    var rel=v.shorts===0?100:Math.max(0,100-((v.shortVal/v.spend)*100*10));
-    var rc=rel>=95?'#16a34a':rel>=85?'#d97706':'#dc2626';
-    return '<tr><td style="font-weight:500">'+v.name+'</td><td style="color:#6b7280">'+v.invoices+'</td><td style="font-weight:500">$'+v.spend.toFixed(2)+'</td><td style="color:'+(v.shorts>0?'#dc2626':'#9ca3af')+'">'+v.shorts+'</td><td style="color:'+(v.shortVal>0?'#dc2626':'#9ca3af')+'">$'+v.shortVal.toFixed(2)+'</td><td style="color:'+(v.priceInc>3?'#d97706':'#9ca3af')+'">'+v.priceInc+' items</td><td><div style="display:flex;align-items:center;gap:6px"><div style="width:60px;height:5px;background:#f3f4f6;border-radius:3px;overflow:hidden"><div style="width:'+rel.toFixed(0)+'%;height:100%;background:'+rc+';border-radius:3px"></div></div><span style="font-size:11px;font-weight:600;color:'+rc+'">'+rel.toFixed(0)+'%</span></div></td></tr>';
+  var changes = priceChanges().filter(function(i){ return i.price > i.prev; });
+  var body = document.getElementById('vendor-table');
+  if(!REPORT_VENDORS.length){
+    body.innerHTML = '<tr><td colspan="7" style="color:#9ca3af;font-size:12px;padding:14px 0">No invoices saved yet. Scan an invoice to see vendor totals.</td></tr>';
+    return;
+  }
+  body.innerHTML = REPORT_VENDORS.map(function(v){
+    var priceInc = changes.filter(function(i){
+      return i.vendor && v.name.toLowerCase().indexOf(i.vendor.toLowerCase()) >= 0;
+    }).length;
+    var rel = v.shorts === 0 ? 100 : Math.max(0, 100 - ((v.shortVal / (v.spend || 1)) * 100 * 10));
+    var rc = rel >= 95 ? '#16a34a' : rel >= 85 ? '#d97706' : '#dc2626';
+    return '<tr><td style="font-weight:500">' + v.name + '</td><td style="color:#6b7280">' + v.invoices + '</td><td style="font-weight:500">' + money(v.spend) + '</td><td style="color:' + (v.shorts > 0 ? '#dc2626' : '#9ca3af') + '">' + v.shorts + '</td><td style="color:' + (v.shortVal > 0 ? '#dc2626' : '#9ca3af') + '">' + money(v.shortVal) + '</td><td style="color:' + (priceInc > 3 ? '#d97706' : '#9ca3af') + '">' + priceInc + ' item' + (priceInc === 1 ? '' : 's') + '</td><td><div style="display:flex;align-items:center;gap:6px"><div style="width:60px;height:5px;background:#f3f4f6;border-radius:3px;overflow:hidden"><div style="width:' + rel.toFixed(0) + '%;height:100%;background:' + rc + ';border-radius:3px"></div></div><span style="font-size:11px;font-weight:600;color:' + rc + '">' + rel.toFixed(0) + '%</span></div></td></tr>';
   }).join('');
+}
+
+function initReports(){
+  if(typeof Chart === 'undefined'){ setTimeout(initReports, 200); return; }
+  loadReportInvoices(function(){
+    computeReportData();
+    [renderReportHeader, renderKPIs, function(){ renderSpendChart(spendChartType); }, renderFCChart,
+     renderTrendChart, renderVendorChart, renderCredits, renderBudgetChart, renderVendorTable].forEach(function(fn){
+      try { fn(); } catch(e){ console.error('Reports section failed:', e); }
+    });
+  });
 }
 
 function exportCSV(){
@@ -3524,15 +3724,45 @@ function renderInvoiceReview(data, fileName) {
   }
 }
 
+function invoicePriceForIngredient(item, ing) {
+  var price = parseFloat(item.unit_price);
+  if (!(price > 0)) return null;
+  var unit = (ing.unit || "").toLowerCase();
+  // Items counted by the each, can, bottle, bag etc. keep the invoice price per item
+  if (unit !== "kg" && unit !== "100g") return price;
+  // Weight-priced ingredient: work out the price per kg first
+  var perKg = null;
+  var invUnit = (item.unit || "").toString().toLowerCase();
+  if (parseFloat(item.price_per_kg) > 0) {
+    perKg = parseFloat(item.price_per_kg);
+  } else if (parseFloat(item.weight_kg) > 0) {
+    perKg = price / parseFloat(item.weight_kg);
+  } else if (invUnit === "kg") {
+    perKg = price;
+  } else if (invUnit === "lb") {
+    perKg = price * 2.20462;
+  }
+  if (perKg === null) {
+    var answer = window.prompt(ing.name + ": the invoice shows $" + price.toFixed(2) + " for the whole item. How many kg is it? Press Cancel to skip this item.");
+    var kg = parseFloat(answer);
+    if (!(kg > 0)) return null;
+    perKg = price / kg;
+  }
+  var result = unit === "100g" ? perKg / 10 : perKg;
+  return Math.round(result * 10000) / 10000;
+}
+
 function applyInvoiceItem(idx) {
   var item = parsedInvoiceData.line_items[idx];
   var match = matchIngredient(item);
   if (!match) return;
   var ing = match.ing;
-  var netPrice = parseFloat(item.unit_price); // already net after TDP
+  var netPrice = invoicePriceForIngredient(item, ing); // converted to the catalog unit
+  if (netPrice === null) return;
   if (ing.price !== netPrice) {
     ing.prev = ing.price;
     ing.price = netPrice;
+    ORIGINAL_PRICES[ing.id] = netPrice;
     ing._edited = true;
     saveIngredientToDb(ing);
     if (activeIngFilter !== undefined) renderIngredients();
@@ -3553,9 +3783,12 @@ function approveAllInvoiceItems() {
     var match = matchIngredient(item);
     if (!match) return;
     var ing = match.ing;
-    if (ing.price !== parseFloat(item.unit_price)) {
+    var newPrice = invoicePriceForIngredient(item, ing);
+    if (newPrice === null) return;
+    if (ing.price !== newPrice) {
       ing.prev = ing.price;
-      ing.price = parseFloat(item.unit_price);
+      ing.price = newPrice;
+      ORIGINAL_PRICES[ing.id] = newPrice;
       ing._edited = true;
       saveIngredientToDb(ing);
       updated++;
@@ -3628,9 +3861,12 @@ function linkInvoiceItem(idx, ingId) {
   var item = parsedInvoiceData.line_items[idx];
   var ing = ING.find(function(i){ return i.id === parseInt(ingId); });
   if (!ing) return;
-  if (ing.price !== parseFloat(item.unit_price)) {
+  var linkedPrice = invoicePriceForIngredient(item, ing);
+  if (linkedPrice === null) return;
+  if (ing.price !== linkedPrice) {
     ing.prev = ing.price;
-    ing.price = parseFloat(item.unit_price);
+    ing.price = linkedPrice;
+    ORIGINAL_PRICES[ing.id] = linkedPrice;
     ing.sku = item.sku || ing.sku;
     ing._edited = true;
     saveIngredientToDb(ing);
