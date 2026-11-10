@@ -3,15 +3,40 @@ const https = require('https');
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
   try {
-    const { base64Data, mediaType, apiKey } = req.body || {};
+    const body = req.body || {};
+    const base64Data = body.base64Data;
+    const mediaType = body.mediaType;
+    // The Anthropic key lives in Vercel's environment variables (ANTHROPIC_API_KEY).
+    // A key sent from the browser is only used as a fallback if that variable is not set.
+    const apiKey = process.env.ANTHROPIC_API_KEY || body.apiKey;
+
+    // Only signed-in users may use the scanner, because every scan spends Anthropic credit.
+    const sbUrl = process.env.SUPABASE_URL;
+    const sbKey = process.env.SUPABASE_ANON_KEY;
+    if (sbUrl && sbKey) {
+      const token = ((req.headers && req.headers.authorization) || '').replace(/^Bearer\s+/i, '');
+      let signedIn = false;
+      if (token) {
+        try {
+          const who = await fetch(sbUrl.replace(/\/+$/, '') + '/auth/v1/user', {
+            headers: { apikey: sbKey, Authorization: 'Bearer ' + token }
+          });
+          signedIn = who.status === 200;
+        } catch (e) { signedIn = false; }
+      }
+      if (!signedIn) {
+        res.status(401).json({ error: 'Please sign in again, then retry the scan.' });
+        return;
+      }
+    }
 
     if (!apiKey) {
-      res.status(500).json({ error: 'No API key provided. Add your Anthropic key in Settings.' });
+      res.status(500).json({ error: 'No Anthropic key found. Add ANTHROPIC_API_KEY in your Vercel project settings.' });
       return;
     }
     if (!base64Data) {
