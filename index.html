@@ -1057,12 +1057,18 @@ function requireAdmin() {
   showSaveToast('View only: this needs an admin account', '#dc2626');
   return false;
 }
-function loadUserRole(cb) {
+function loadUserRole(cb, attempt) {
+  attempt = attempt || 0;
   if (!sb || !currentUser) { USER_ROLE = null; cb(); return; }
+  function settle(found) {
+    // An empty or failed answer can be a one-off hiccup at startup, so look again before settling on view-only
+    if (!found && attempt < 2) { setTimeout(function() { loadUserRole(cb, attempt + 1); }, 900); return; }
+    USER_ROLE = found ? 'admin' : 'staff';
+    cb();
+  }
   sb.from('user_roles').select('role').eq('user_id', currentUser.id).maybeSingle()
-    .then(function(res) { USER_ROLE = (res && res.data && res.data.role === 'admin') ? 'admin' : 'staff'; })
-    .catch(function() { USER_ROLE = 'staff'; })
-    .then(function() { cb(); });
+    .then(function(res) { settle(!!(res && res.data && res.data.role === 'admin')); })
+    .catch(function() { settle(false); });
 }
 function applyRoleUI() {
   var admin = isAdmin();
@@ -1077,6 +1083,7 @@ function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = 'flex';
   renderDashboard();
+  if (sb) document.body.classList.add('role-staff');   // start view-only until the role is confirmed
   loadUserRole(applyRoleUI);
 }
 
@@ -3230,7 +3237,15 @@ function setChartEmpty(id, msg){
 
 function money(n){ return '$' + (Math.round(n * 100) / 100).toLocaleString('en-CA', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
-function reportCategory(cat){ return COLORS[cat] ? cat : 'Other'; }
+function reportCategory(cat){
+  var key = String(cat || '').trim().toLowerCase();
+  var names = Object.keys(COLORS);
+  for (var i = 0; i < names.length; i++) { if (names[i].toLowerCase() === key) return names[i]; }
+  var alias = { meat:'Protein', poultry:'Protein', seafood:'Protein', fish:'Protein', vegetable:'Produce', vegetables:'Produce', fruit:'Produce',
+    beverages:'Beverage', drinks:'Beverage', 'dry good':'Dry Goods', grocery:'Dry Goods', pantry:'Dry Goods', paper:'Paper/Disposables',
+    disposables:'Paper/Disposables', 'paper goods':'Paper/Disposables', cleaning:'Chemical', chemicals:'Chemical', bread:'Bakery' };
+  return alias[key] || 'Other';
+}
 
 function lineAmount(l){
   var e = parseFloat(l.extended_price);
