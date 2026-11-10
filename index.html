@@ -94,6 +94,17 @@
     #print-checklist{display:block!important}
     body{overflow:visible}
   }
+/* Staff accounts are view-only: hide the buttons that change data (the database blocks the changes as well) */
+body.role-staff button[onclick*="showBuilder("],
+body.role-staff button[onclick*="toggleRecipeEdit("],
+body.role-staff button[onclick*="deleteRecipe("],
+body.role-staff button[onclick*="openEdit("],
+body.role-staff button[onclick*="confirmDeleteIngredient("],
+body.role-staff button[onclick*="deleteInvoice("],
+body.role-staff button[onclick*="applyInvoiceItem("],
+body.role-staff button[onclick*="forceSyncAll("],
+body.role-staff button[onclick*="restoreDefaults("],
+body.role-staff button[onclick*="nav('invoices'"] { display:none !important; }
 </style>
 </head>
 <body>
@@ -256,6 +267,7 @@
     <div class="lbl">Location</div>
     <div class="val">Scarborough #1</div>
     <div style="font-size:10px;color:#64748b;margin-top:6px;word-break:break-all" id="user-email"></div>
+    <div id="user-role" style="font-size:10px;font-weight:600;color:#f59e0b;margin-top:2px"></div>
     <button onclick="doLogout()" id="logout-btn" style="display:none;margin-top:10px;width:100%;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:11px;font-weight:500;padding:7px 10px;cursor:pointer;text-align:center">Sign out</button>
     <button onclick="openSettingsModal()" style="margin-top:8px;width:100%;background:#1e293b;border:1px solid #475569;border-radius:8px;color:#94a3b8;font-size:11px;font-weight:500;padding:7px 10px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:6px">
       <span style="font-size:13px">⚙</span> Database settings
@@ -454,7 +466,7 @@
     </div>
     <div class="cat-filter" id="ing-cat-filters"></div>
     <input class="search-input" id="ing-search" placeholder="Search by name or vendor..." oninput="renderIngredients()">
-    <div style="font-size:11px;color:#9ca3af;margin-bottom:10px">Click any row to edit · click ✕ to delete</div>
+    <div id="ing-hint" style="font-size:11px;color:#9ca3af;margin-bottom:10px">Click any row to edit · click ✕ to delete</div>
     <div class="card">
       <table><thead style="background:#f9fafb"><tr>
         <th>SKU</th><th>Name</th><th>Vendor</th><th>Category</th><th>Unit</th><th>Price/Unit</th><th>Change</th><th style="width:50px"></th>
@@ -1037,10 +1049,35 @@ function showLogin() {
   document.getElementById('app-shell').style.display = 'none';
 }
 
+// ── ROLES: admin can change data, staff can only view and record counts ───────
+var USER_ROLE = null;   // 'admin' or 'staff' once loaded
+function isAdmin() { return !sb || USER_ROLE === 'admin'; }   // no database = local sandbox, nothing is shared
+function requireAdmin() {
+  if (isAdmin()) return true;
+  showSaveToast('View only: this needs an admin account', '#dc2626');
+  return false;
+}
+function loadUserRole(cb) {
+  if (!sb || !currentUser) { USER_ROLE = null; cb(); return; }
+  sb.from('user_roles').select('role').eq('user_id', currentUser.id).maybeSingle()
+    .then(function(res) { USER_ROLE = (res && res.data && res.data.role === 'admin') ? 'admin' : 'staff'; })
+    .catch(function() { USER_ROLE = 'staff'; })
+    .then(function() { cb(); });
+}
+function applyRoleUI() {
+  var admin = isAdmin();
+  document.body.classList.toggle('role-staff', !admin);
+  var badge = document.getElementById('user-role');
+  if (badge) badge.textContent = sb ? (admin ? 'Admin' : 'View only') : '';
+  var hint = document.getElementById('ing-hint');
+  if (hint) hint.textContent = admin ? 'Click any row to edit · click ✕ to delete' : 'View only. Ask an admin to change prices or ingredients.';
+}
+
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app-shell').style.display = 'flex';
   renderDashboard();
+  loadUserRole(applyRoleUI);
 }
 
 function doLogin() {
@@ -1166,6 +1203,7 @@ function syncFromSupabase() {
 }
 
 function seedIngredients() {
+  if (!isAdmin()) return;
   if (!sb) return;
   const rows = ING.map(i => ({ id: i.id, sku: i.sku, name: i.name, vendor: i.vendor, category: i.cat, unit: i.unit, price: i.price, prev_price: i.prev, edited: !!i._edited }));
   sb.from('ingredients').upsert(rows, { onConflict: 'id' });
@@ -1173,6 +1211,7 @@ function seedIngredients() {
 }
 
 function seedRecipes() {
+  if (!isAdmin()) return;
   if (!sb) return;
   var recipeQueue = recipes.slice();
   function seedNext() {
@@ -1206,6 +1245,7 @@ function seedRecipes() {
 }
 
 function restoreDefaults() {
+  if (!requireAdmin()) return;
   if (!confirm('This will restore all 35 default recipes and ingredients. Continue?')) return;
   if (!sb) { alert('Not connected to database. Please log in first.'); return; }
 
@@ -1260,6 +1300,7 @@ function restoreDefaults() {
 }
 
 function forceSyncAll() {
+  if (!requireAdmin()) return;
   if (!sb) { showSaveToast('Not connected to database. Go to Database tab first.', '#dc2626'); return; }
   var btn = document.getElementById('sync-btn');
   btn.textContent = 'Syncing…';
@@ -1313,6 +1354,7 @@ function forceSyncAll() {
 }
 
 function saveIngredientToDb(ing) {
+  if (!requireAdmin()) return;
   if (!sb) { showSaveToast('Saved locally (no database connected)','#d97706'); return; }
   sb.from('ingredients').upsert({
     id: ing.id, sku: ing.sku, name: ing.name, vendor: ing.vendor,
@@ -1349,6 +1391,7 @@ function showSaveToast(msg, color) {
 }
 
 function saveRecipeToDb(recipe) {
+  if (!requireAdmin()) return;
   if (!sb) { showSaveToast('Saved locally (no database connected)','#d97706'); return; }
   sb.from('recipes').upsert({
     id: recipe.id, name: recipe.name, category: recipe.cat,
@@ -1371,6 +1414,7 @@ function saveRecipeToDb(recipe) {
 }
 
 function deleteRecipeFromDb(id) {
+  if (!requireAdmin()) return;
   if (!sb) { showSaveToast('Deleted locally (no database connected)', '#d97706'); return; }
   sb.from('recipe_ingredients').delete().eq('recipe_id', id)
     .then(function() {
@@ -2110,6 +2154,7 @@ function showDetail(id){
 
 let builderIngs=[],selectedIngId=null;
 function showBuilder(){
+  if (!requireAdmin()) return;
   builderIngs=[];selectedIngId=null;
   ['b-name','b-search','b-qty','b-sell'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   document.getElementById('b-ing-list').innerHTML='<div style="color:#d1d5db;font-size:12px;text-align:center;padding-top:20px">No ingredients yet</div>';
@@ -2174,6 +2219,7 @@ function builderUpdate(){
 }
 let _pendingDeleteId=null;
 function deleteRecipe(id){
+  if (!requireAdmin()) return;
   const r=recipes.find(x=>x.id===id);
   if(!r)return;
   _pendingDeleteId=id;
@@ -2181,6 +2227,7 @@ function deleteRecipe(id){
   document.getElementById('delete-confirm-modal').style.display='flex';
 }
 function confirmDelete(){
+  if (!requireAdmin()) return;
   if(_pendingDeleteId===null) return;
   var id = _pendingDeleteId;
   var wasDetail = document.getElementById('view-detail').classList.contains('active');
@@ -2228,6 +2275,7 @@ function closeDeleteModal(){
 }
 
 function saveRecipe(){
+  if (!requireAdmin()) return;
   const name=document.getElementById('b-name').value.trim();
   if(!name)return;
   const id=Math.max(0,...recipes.map(r=>r.id))+1;
@@ -2296,6 +2344,7 @@ function renderIngredients(){
 let _pendingDeleteIngId = null;
 
 function confirmDeleteIngredient(id) {
+  if (!requireAdmin()) return;
   const ing = ING.find(x => x.id === id);
   if (!ing) return;
   // Check if used in any recipe
@@ -2314,6 +2363,7 @@ function confirmDeleteIngredient(id) {
 }
 
 function doDeleteIngredient() {
+  if (!requireAdmin()) return;
   if (_pendingDeleteIngId === null) return;
   const id = _pendingDeleteIngId;
   // Remove from ING array
@@ -2353,6 +2403,7 @@ function closeDeleteIngModal() {
 
 
 function openEdit(id){
+  if (!requireAdmin()) return;
   editingId=id;
   const i=ING.find(x=>x.id===id);
   document.getElementById('edit-sku').value=i.sku==='—'?'':i.sku;
@@ -2442,6 +2493,7 @@ function checkPriceChange(){
 }
 
 function saveEdit(){
+  if (!requireAdmin()) return;
   const i=ING.find(x=>x.id===editingId);
   const newPrice=parseFloat(document.getElementById('edit-price').value)||i.price;
   const skuVal=document.getElementById('edit-sku').value.trim();
@@ -2507,6 +2559,7 @@ let reSelectedIngId = null;
 let recipeEditMode = false;
 
 function toggleRecipeEdit() {
+  if (!requireAdmin()) return;
   recipeEditMode ? cancelRecipeEdit() : enterRecipeEdit();
 }
 
@@ -2703,6 +2756,7 @@ function recipeEditLive() {
 }
 
 function saveRecipeEdit() {
+  if (!requireAdmin()) return;
   const r = recipes.find(x => x.id === currentDetailId);
   const isBatch = document.getElementById('re-type').value === 'batch';
   r.name = document.getElementById('re-name').value.trim() || r.name;
@@ -3528,6 +3582,7 @@ function initInvoicePage() {
 }
 
 function handleInvoiceDrop(event) {
+  if (!requireAdmin()) return;
   event.preventDefault();
   document.getElementById('invoice-dropzone').style.borderColor = '#e5e7eb';
   var file = event.dataTransfer.files[0];
@@ -3535,6 +3590,7 @@ function handleInvoiceDrop(event) {
 }
 
 function handleInvoiceFile(file) {
+  if (!requireAdmin()) return;
   if (!file) return;
 
   var anthropicKey = localStorage.getItem('anthropic_key') || 'server-side';
@@ -3768,6 +3824,7 @@ function invoicePriceForIngredient(item, ing) {
 }
 
 function applyInvoiceItem(idx) {
+  if (!requireAdmin()) return;
   var item = parsedInvoiceData.line_items[idx];
   var match = matchIngredient(item);
   if (!match) return;
@@ -3791,6 +3848,7 @@ function applyInvoiceItem(idx) {
 }
 
 function approveAllInvoiceItems() {
+  if (!requireAdmin()) return;
   var items = parsedInvoiceData.line_items || [];
   var updated = 0;
   items.forEach(function(item, idx) {
@@ -3872,6 +3930,7 @@ function approveAllInvoiceItems() {
 }
 
 function linkInvoiceItem(idx, ingId) {
+  if (!requireAdmin()) return;
   if (!ingId) return;
   var item = parsedInvoiceData.line_items[idx];
   var ing = ING.find(function(i){ return i.id === parseInt(ingId); });
@@ -3890,6 +3949,7 @@ function linkInvoiceItem(idx, ingId) {
 }
 
 function addAsNewIngredient(idx) {
+  if (!requireAdmin()) return;
   var item = parsedInvoiceData.line_items[idx];
   var newId = Math.max.apply(null, ING.map(function(i){ return i.id; })) + 1;
   var newIng = {
@@ -3913,6 +3973,7 @@ function resetInvoiceUpload() {
 }
 
 function deleteInvoice(id) {
+  if (!requireAdmin()) return;
   var inv = (window._invoiceHistory || []).find(function(i) { return i.id === id; });
   var name = inv ? (inv.vendor || 'this invoice') : 'this invoice';
   if (!confirm('Delete ' + name + '? This cannot be undone.')) return;
