@@ -21,16 +21,29 @@ module.exports = async function handler(req, res) {
     if (sbUrl && sbKey) {
       const token = ((req.headers && req.headers.authorization) || '').replace(/^Bearer\s+/i, '');
       let signedIn = false;
+      let isAdminUser = false;
       if (token) {
         try {
           const who = await fetch(sbUrl.replace(/\/+$/, '') + '/auth/v1/user', {
             headers: { apikey: sbKey, Authorization: 'Bearer ' + token }
           });
           signedIn = who.status === 200;
+          if (signedIn) {
+            const user = await who.json();
+            const roleRes = await fetch(sbUrl.replace(/\/+$/, '') + '/rest/v1/user_roles?select=role&user_id=eq.' + encodeURIComponent(user.id), {
+              headers: { apikey: sbKey, Authorization: 'Bearer ' + token }
+            });
+            const roleRows = roleRes.ok ? await roleRes.json() : [];
+            isAdminUser = Array.isArray(roleRows) && roleRows.length > 0 && roleRows[0].role === 'admin';
+          }
         } catch (e) { signedIn = false; }
       }
       if (!signedIn) {
         res.status(401).json({ error: 'Please sign in again, then retry the scan.' });
+        return;
+      }
+      if (!isAdminUser) {
+        res.status(403).json({ error: 'Only admin accounts can scan invoices.' });
         return;
       }
     }
