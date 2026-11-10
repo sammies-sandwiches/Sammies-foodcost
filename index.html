@@ -892,9 +892,19 @@
 let sb = null;
 let currentUser = null;
 
+// Connection details supplied by the server (Vercel environment variables), if set up
+var BACKEND_CONFIG = null;
+function loadBackendConfig(cb) {
+  fetch('/api/config', { cache: 'no-store' })
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(j) { if (j && j.configured && j.supabaseUrl && j.supabaseKey) BACKEND_CONFIG = j; })
+    .catch(function() {})
+    .then(function() { cb(); });
+}
+
 function initSupabase() {
-  var url = localStorage.getItem('sb_url');
-  var key = localStorage.getItem('sb_key');
+  var url = BACKEND_CONFIG ? BACKEND_CONFIG.supabaseUrl : localStorage.getItem('sb_url');
+  var key = BACKEND_CONFIG ? BACKEND_CONFIG.supabaseKey : localStorage.getItem('sb_key');
   if (!url || !key || url === 'YOUR_SUPABASE_URL') return;
   try {
     sb = window.supabase.createClient(url, key);
@@ -3605,10 +3615,15 @@ function parseInvoiceWithClaude(base64Data, mediaType, apiKey, fileName) {
   ];
 
   var anthropicKey = localStorage.getItem('anthropic_key') || '';
-  fetch('/api/parse-invoice', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ base64Data: base64Data, mediaType: mediaType, apiKey: anthropicKey })
+  var tokenPromise = sb
+    ? sb.auth.getSession().then(function(r) { return (r && r.data && r.data.session) ? r.data.session.access_token : ''; }).catch(function() { return ''; })
+    : Promise.resolve('');
+  tokenPromise.then(function(token) {
+    return fetch('/api/parse-invoice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ base64Data: base64Data, mediaType: mediaType, apiKey: anthropicKey })
+    });
   })
   .then(function(res) {
     var ct = res.headers.get('content-type') || '';
@@ -3940,12 +3955,22 @@ function renderInvoiceHistory() {
 }
 
 document.addEventListener('DOMContentLoaded',function(){
-  initSupabase();
-  if(sb){checkAuth();}
-  else{
-    document.getElementById('login-screen').style.display='flex';
-    document.getElementById('app-shell').style.display='none';
-  }
+  loadBackendConfig(function(){
+    initSupabase();
+    if(BACKEND_CONFIG){
+      // Keys come from the server, so hide the manual setup tab and the local-only link
+      var setupBtn = document.getElementById('tab-setup-btn');
+      if(setupBtn) setupBtn.style.display = 'none';
+      Array.prototype.forEach.call(document.querySelectorAll('#login-screen a'), function(a){
+        if(/local only/i.test(a.textContent)) a.style.display = 'none';
+      });
+    }
+    if(sb){checkAuth();}
+    else{
+      document.getElementById('login-screen').style.display='flex';
+      document.getElementById('app-shell').style.display='none';
+    }
+  });
 });
 
 </script>
