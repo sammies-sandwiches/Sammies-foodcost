@@ -3565,30 +3565,137 @@ function exportCSV(){
 var parsedInvoiceData = null;
 var invoiceHistory = [];
 
+// ── SAVED INVOICES: every scan is stored (image and data) so it can be viewed or downloaded later ──
+var currentInvoiceRowId = null;
+
+function invoiceFileExt(mediaType) {
+  return mediaType === 'application/pdf' ? 'pdf' : mediaType === 'image/png' ? 'png' : mediaType === 'image/webp' ? 'webp' : 'jpg';
+}
+
+function dataUrlToBlob(dataUrl, mediaType) {
+  var byteStr = atob(dataUrl.split(',')[1]);
+  var arr = new Uint8Array(byteStr.length);
+  for (var i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+  return new Blob([arr], { type: mediaType });
+}
+
+function cleanInvoiceDate(d) { return /^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? d : null; }
+function cleanInvoiceAmount(a) {
+  var n = parseFloat(String(a === null || a === undefined ? '' : a).replace(/[^0-9.\-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+
+// Runs right after a successful scan: stores the original file and a record, so it is never lost
+function saveScannedInvoice(parsed, originalName) {
+  currentInvoiceRowId = null;
+  if (!sb || !isAdmin() || !window._currentInvoiceDataUrl) return;
+  var mediaType = window._currentInvoiceMediaType || 'image/jpeg';
+  var path = 'invoice-' + Date.now() + '.' + invoiceFileExt(mediaType);
+  var blob = dataUrlToBlob(window._currentInvoiceDataUrl, mediaType);
+  var dupe = parsed.invoice_number && invoiceHistory.some(function(h) { return h.number && h.number === String(parsed.invoice_number) && h.vendor === (parsed.vendor_name || 'Unknown'); });
+  sb.storage.from('invoices').upload(path, blob, { contentType: mediaType })
+    .then(function(r) {
+      if (r.error) throw r.error;
+      var scanUrl = sb.storage.from('invoices').getPublicUrl(path).data.publicUrl;
+      var raw = Object.assign({}, parsed, { _scan_url: scanUrl, _scan_path: path, _original_name: originalName || null, _status: 'scanned' });
+      return sb.from('invoices').insert({
+        vendor: parsed.vendor_name || 'Unknown',
+        invoice_number: parsed.invoice_number ? String(parsed.invoice_number) : null,
+        invoice_date: cleanInvoiceDate(parsed.invoice_date),
+        total_amount: cleanInvoiceAmount(parsed.total_amount),
+        raw_json: raw
+      }).select();
+    })
+    .then(function(res) {
+      if (res.error) throw res.error;
+      currentInvoiceRowId = res.data && res.data[0] ? res.data[0].id : null;
+      showSaveToast(dupe ? 'Scan saved. Note: an invoice with this number was already saved.' : 'Scan saved. View or download it any time from Invoice history.', dupe ? '#d97706' : '#16a34a');
+      initInvoicePage();
+    })
+    .catch(function(e) { showSaveToast('Could not save the scan: ' + ((e && e.message) || e), '#dc2626'); });
+}
+
+function findInvoice(id) { return invoiceHistory.find(function(i) { return i.id === id; }); }
+
+function openInvoiceScan(id) {
+  var inv = findInvoice(id);
+  if (inv && inv.scanUrl) window.open(inv.scanUrl, '_blank');
+}
+
+function invoiceDownloadName(inv) {
+  var ext = ((inv.scanPath || inv.scanUrl || '').split('?')[0].split('.').pop() || 'jpg').toLowerCase();
+  var base = [inv.vendor, inv.number, inv.date].filter(Boolean).join('_').replace(/[^A-Za-z0-9._-]+/g, '_');
+  return (base || 'invoice') + '.' + ext;
+}
+
+function downloadInvoiceScan(id) {
+  var inv = findInvoice(id);
+  if (!inv || !inv.scanUrl) return;
+  var a = document.createElement('a');
+  a.href = inv.scanUrl + (inv.scanUrl.indexOf('?') < 0 ? '?' : '&') + 'download=' + encodeURIComponent(invoiceDownloadName(inv));
+  a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
 function initInvoicePage() {
   renderInvoiceHistory();
-  // Load invoice history from Supabase including scan URLs
-  if (sb) {
-    sb.from('invoices').select('*').order('parsed_at', { ascending: false }).limit(50)
-      .then(function(res) {
-        if (res.error || !res.data || !res.data.length) return;
-        // Merge Supabase invoices into invoiceHistory
-        res.data.forEach(function(row) {
-          var exists = invoiceHistory.find(function(h) { return h.id === row.id; });
-          if (!exists) {
-            invoiceHistory.push({
-              id: row.id,
-              vendor: row.vendor || 'Unknown',
-              date: row.invoice_date || '',
-              items: row.raw_json && row.raw_json.line_items ? row.raw_json.line_items.length : '—',
-              updated: '—',
-              scanUrl: row.raw_json && row.raw_json._scan_url ? row.raw_json._scan_url : null
-            });
-          }
-        });
-        renderInvoiceHistory();
+  if (!sb) return;
+  sb.from('invoices').select('id,vendor,invoice_number,invoice_date,total_amount,raw_json,parsed_at').order('parsed_at', { ascending: false }).limit(100)
+    .then(function(res) {
+      if (!res || res.error || !res.data) return;
+      invoiceHistory = res.data.map(function(row) {
+        var raw = row.raw_json || {};
+        return { id: row.id, vendor: row.vendor || 'Unknown', number: row.invoice_number || '', date: row.invoice_date || '',
+                 total: row.total_amount, items: raw.line_items ? raw.line_items.length : 0, status: raw._status || 'applied',
+                 scanUrl: raw._scan_url || null, scanPath: raw._scan_path || null };
       });
+      renderInvoiceHistory();
+    });
+}
+
+function invoiceButton(label, onclick, bg, color, border) {
+  var b = document.createElement('button');
+  b.textContent = label;
+  b.setAttribute('onclick', onclick);
+  b.style.cssText = 'background:' + bg + ';color:' + color + ';border:' + border + ';border-radius:6px;font-size:11px;font-weight:600;padding:4px 10px;cursor:pointer';
+  return b;
+}
+
+function renderInvoiceHistory() {
+  var el = document.getElementById('invoice-history-list');
+  if (!el) return;
+  el.innerHTML = '';
+  if (!invoiceHistory.length) {
+    el.innerHTML = '<div style="font-size:12px;color:#9ca3af">No invoices saved yet. Upload one above and it is stored here for viewing and download.</div>';
+    return;
   }
+  invoiceHistory.forEach(function(inv) {
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #f3f4f6;font-size:12px;flex-wrap:wrap';
+    var left = document.createElement('div');
+    left.style.cssText = 'min-width:200px;flex:1';
+    var name = document.createElement('div');
+    name.style.cssText = 'font-weight:600;color:#111827';
+    name.textContent = inv.vendor;
+    var meta = document.createElement('div');
+    meta.style.cssText = 'color:#9ca3af;font-size:11px;margin-top:2px';
+    meta.textContent = [inv.number ? '#' + inv.number : '', inv.date, inv.total ? '$' + Number(inv.total).toFixed(2) : '', inv.items + ' items'].filter(Boolean).join(' · ');
+    left.appendChild(name); left.appendChild(meta);
+    var right = document.createElement('div');
+    right.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap';
+    var badge = document.createElement('span');
+    var scannedOnly = inv.status === 'scanned';
+    badge.textContent = scannedOnly ? 'Scanned, prices not applied' : 'Prices applied';
+    badge.style.cssText = 'font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;' + (scannedOnly ? 'background:#fef3c7;color:#92400e' : 'background:#dcfce7;color:#166534');
+    right.appendChild(badge);
+    if (inv.scanUrl) {
+      right.appendChild(invoiceButton('View', 'openInvoiceScan(' + inv.id + ')', '#f59e0b', '#fff', 'none'));
+      right.appendChild(invoiceButton('Download', 'downloadInvoiceScan(' + inv.id + ')', '#111827', '#fff', 'none'));
+    }
+    right.appendChild(invoiceButton('Delete', 'deleteInvoice(' + inv.id + ')', '#fff', '#dc2626', '1px solid #fecaca'));
+    row.appendChild(left); row.appendChild(right);
+    el.appendChild(row);
+  });
 }
 
 function handleInvoiceDrop(event) {
@@ -3707,6 +3814,7 @@ function parseInvoiceWithClaude(base64Data, mediaType, apiKey, fileName) {
     if (!data.line_items) throw new Error('No line items. Got: ' + JSON.stringify(data).slice(0,200));
     parsedInvoiceData = data;
     renderInvoiceReview(data, fileName);
+    saveScannedInvoice(data, fileName);
   })
   .catch(function(e) {
     console.error('Invoice parse error:', e);
@@ -3886,24 +3994,32 @@ function approveAllInvoiceItems() {
   // Save invoice to Supabase with scan image
   if (!sb || !parsedInvoiceData) return;
 
+  // The scan was already stored when it was uploaded, so just mark that saved invoice as applied
+  if (currentInvoiceRowId) {
+    var rowId = currentInvoiceRowId;
+    sb.from('invoices').select('raw_json').eq('id', rowId).single().then(function(r) {
+      var raw = Object.assign({}, (r.data && r.data.raw_json) || {}, parsedInvoiceData, { _status: 'applied', _applied_at: new Date().toISOString(), _prices_updated: updated });
+      return sb.from('invoices').update({ raw_json: raw }).eq('id', rowId);
+    }).then(function(res) {
+      if (res && res.error) { showSaveToast('Prices applied, but the invoice record could not be updated: ' + res.error.message, '#d97706'); return; }
+      currentInvoiceRowId = null;
+      showSaveToast('Prices applied and the invoice record is updated', '#16a34a');
+      initInvoicePage();
+    });
+    return;
+  }
+
   function saveInvoiceRecord(scanUrl) {
     var rawWithScan = Object.assign({}, parsedInvoiceData, { _scan_url: scanUrl || null });
     sb.from('invoices').insert({
       vendor: parsedInvoiceData.vendor_name || 'Unknown',
       invoice_number: parsedInvoiceData.invoice_number || null,
-      invoice_date: parsedInvoiceData.invoice_date || null,
-      total_amount: parsedInvoiceData.total_amount || null,
-      raw_json: rawWithScan
+      invoice_date: cleanInvoiceDate(parsedInvoiceData.invoice_date),
+      total_amount: cleanInvoiceAmount(parsedInvoiceData.total_amount),
+      raw_json: Object.assign({}, rawWithScan, { _status: 'applied' })
     }).then(function(res) {
       if (!res.error) {
-        invoiceHistory.unshift({
-          vendor: parsedInvoiceData.vendor_name || 'Unknown',
-          date: parsedInvoiceData.invoice_date || '',
-          items: items.length,
-          updated: updated,
-          scanUrl: scanUrl || null
-        });
-        renderInvoiceHistory();
+        initInvoicePage();
         if (scanUrl) showSaveToast('Invoice + scan saved ✓', '#16a34a');
       }
     });
@@ -3976,6 +4092,7 @@ function addAsNewIngredient(idx) {
 
 function resetInvoiceUpload() {
   parsedInvoiceData = null;
+  currentInvoiceRowId = null;
   document.getElementById('invoice-dropzone').style.display = 'block';
   document.getElementById('invoice-parsing-status').style.display = 'none';
   document.getElementById('invoice-review').style.display = 'none';
@@ -3984,46 +4101,19 @@ function resetInvoiceUpload() {
 
 function deleteInvoice(id) {
   if (!requireAdmin()) return;
-  var inv = (window._invoiceHistory || []).find(function(i) { return i.id === id; });
-  var name = inv ? (inv.vendor || 'this invoice') : 'this invoice';
-  if (!confirm('Delete ' + name + '? This cannot be undone.')) return;
-  // Delete from Supabase
-  if (sb) {
-    // Delete scan from storage if it exists
-    if (inv && inv.raw_json && inv.raw_json._scan_url) {
-      var url = inv.raw_json._scan_url;
-      var fileName = url.split('/').pop();
-      sb.storage.from('invoices').remove([fileName]).catch(function() {});
-    }
-    sb.from('invoices').delete().eq('id', id)
-      .then(function(res) {
-        if (res.error) {
-          showSaveToast('Delete failed: ' + res.error.message, '#dc2626');
-        } else {
-          showSaveToast('Invoice deleted', '#16a34a');
-          loadInvoiceHistory();
-        }
-      });
-  }
+  var inv = findInvoice(id);
+  if (!inv) return;
+  if (!confirm('Delete the saved invoice from ' + inv.vendor + (inv.date ? ' (' + inv.date + ')' : '') + ' and its scan? This cannot be undone.')) return;
+  var path = inv.scanPath || (inv.scanUrl ? decodeURIComponent(inv.scanUrl.split('/').pop().split('?')[0]) : null);
+  sb.from('invoices').delete().eq('id', id).then(function(res) {
+    if (res.error) { showSaveToast('Delete failed: ' + res.error.message, '#dc2626'); return; }
+    if (path) sb.storage.from('invoices').remove([path]).catch(function() {});
+    showSaveToast('Invoice deleted', '#16a34a');
+    initInvoicePage();
+  });
 }
 
-function renderInvoiceHistory() {
-  var el = document.getElementById('invoice-history-list');
-  if (!el) return;
-  if (invoiceHistory.length === 0) {
-    el.innerHTML = '<div style="font-size:12px;color:#9ca3af">No invoices uploaded yet this session.</div>';
-    return;
-  }
-  el.innerHTML = invoiceHistory.map(function(inv) {
-    var scanBtn = inv.scanUrl
-      ? '<button onclick="window.open(\'' + inv.scanUrl + '\', \'_blank\')" style="background:#f59e0b;border:none;border-radius:6px;color:#fff;font-size:10px;font-weight:600;padding:3px 9px;cursor:pointer;margin-left:8px">📄 View scan</button>'
-      : '';
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f9fafb;font-size:12px">' +
-      '<div><span style="font-weight:500">' + inv.vendor + '</span><span style="color:#9ca3af"> ' + (inv.date||'') + '</span>' + scanBtn + '</div>' +
-      '<div style="color:#9ca3af">' + inv.items + ' items · ' + inv.updated + ' prices updated</div>' +
-    '</div>';
-  }).join('');;
-}
+
 
 document.addEventListener('DOMContentLoaded',function(){
   loadBackendConfig(function(){
