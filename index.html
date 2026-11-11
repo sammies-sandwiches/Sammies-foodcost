@@ -798,8 +798,10 @@ body.role-staff button[onclick*="nav('invoices'"] { display:none !important; }
           <div>
             <h2 style="margin-bottom:4px" id="inv-vendor-name">Vendor</h2>
             <div style="font-size:12px;color:#9ca3af" id="inv-meta-line">Invoice details</div>
+          <div id="inv-header-fields" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-top:12px"></div>
           </div>
           <div style="display:flex;gap:8px">
+            <button id="inv-view-scan-btn" onclick="openCurrentScan()" class="btn" style="display:none;background:#f59e0b;color:#fff;font-size:12px;padding:7px 14px">View scan</button>
             <button onclick="approveAllInvoiceItems()" class="btn btn-dark" style="font-size:12px;padding:7px 16px">Apply all prices</button>
             <button onclick="resetInvoiceUpload()" class="btn" style="background:#f3f4f6;color:#6b7280;font-size:12px;padding:7px 14px">Upload another</button>
           </div>
@@ -816,12 +818,15 @@ body.role-staff button[onclick*="nav('invoices'"] { display:none !important; }
             <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:50%;background:#dc2626;display:inline-block"></span>Short/Credit</span>
           </div>
         </div>
-        <table>
+        <div style="overflow-x:auto">
+        <table style="min-width:1040px">
           <thead style="background:#f9fafb"><tr>
-            <th>SKU</th><th>Description</th><th>Category</th><th>Qty</th><th>Unit Price</th><th>Extended</th><th>Match</th><th>Apply</th>
+            <th>SKU</th><th>Description</th><th>Category</th><th>Qty</th><th>Unit</th><th>Unit price</th><th>Total</th><th>Matches ingredient</th><th>Apply</th><th></th>
           </tr></thead>
           <tbody id="invoice-items-table"></tbody>
         </table>
+        </div>
+        <div style="padding:10px 20px"><button onclick="addInvoiceLine()" style="background:#f3f4f6;border:none;border-radius:6px;padding:6px 12px;font-size:12px;color:#374151;cursor:pointer">+ Add line</button></div>
       </div>
 
       <!-- Unmatched items -->
@@ -3598,6 +3603,7 @@ function saveScannedInvoice(parsed, originalName) {
       if (r.error) throw r.error;
       var scanUrl = sb.storage.from('invoices').getPublicUrl(path).data.publicUrl;
       var raw = Object.assign({}, parsed, { _scan_url: scanUrl, _scan_path: path, _original_name: originalName || null, _status: 'scanned' });
+      currentInvoiceMeta = { _scan_url: scanUrl, _scan_path: path, _original_name: originalName || null, _status: 'scanned' };
       return sb.from('invoices').insert({
         vendor: parsed.vendor_name || 'Unknown',
         invoice_number: parsed.invoice_number ? String(parsed.invoice_number) : null,
@@ -3609,6 +3615,8 @@ function saveScannedInvoice(parsed, originalName) {
     .then(function(res) {
       if (res.error) throw res.error;
       currentInvoiceRowId = res.data && res.data[0] ? res.data[0].id : null;
+      updateViewScanButton();
+      queueInvoiceSave();
       showSaveToast(dupe ? 'Scan saved. Note: an invoice with this number was already saved.' : 'Scan saved. View or download it any time from Invoice history.', dupe ? '#d97706' : '#16a34a');
       initInvoicePage();
     })
@@ -3688,6 +3696,7 @@ function renderInvoiceHistory() {
     badge.textContent = scannedOnly ? 'Scanned, prices not applied' : 'Prices applied';
     badge.style.cssText = 'font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;' + (scannedOnly ? 'background:#fef3c7;color:#92400e' : 'background:#dcfce7;color:#166534');
     right.appendChild(badge);
+    right.appendChild(invoiceButton('Review / edit', 'loadInvoiceForEdit(' + inv.id + ')', '#2563eb', '#fff', 'none'));
     if (inv.scanUrl) {
       right.appendChild(invoiceButton('View', 'openInvoiceScan(' + inv.id + ')', '#f59e0b', '#fff', 'none'));
       right.appendChild(invoiceButton('Download', 'downloadInvoiceScan(' + inv.id + ')', '#111827', '#fff', 'none'));
@@ -3822,119 +3831,376 @@ function parseInvoiceWithClaude(base64Data, mediaType, apiKey, fileName) {
   });
 }
 
+function matchWords(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter(function(w) { return w.length > 2; })
+    .map(function(w) { return w.length > 3 && w.charAt(w.length - 1) === 's' ? w.slice(0, -1) : w; });
+}
+
 function matchIngredient(item) {
-  // Try SKU match first
-  if (item.sku) {
-    var bySkuExact = ING.find(function(i) { return i.sku && i.sku.toLowerCase() === item.sku.toLowerCase(); });
+  // A match the user picked by hand always wins ( 0 means "no match" )
+  if (item._matchId === 0) return null;
+  if (item._matchId) {
+    var chosen = ING.find(function(i) { return i.id === item._matchId; });
+    if (chosen) return { ing: chosen, confidence: 'manual' };
+  }
+  // SKU match first
+  var sku = item.sku ? String(item.sku).trim() : '';
+  if (sku && sku !== '—') {
+    var bySkuExact = ING.find(function(i) { return i.sku && i.sku !== '—' && String(i.sku).toLowerCase() === sku.toLowerCase(); });
     if (bySkuExact) return { ing: bySkuExact, confidence: 'high' };
   }
-  // Try name match
-  var desc = item.description.toLowerCase();
-  var byName = ING.find(function(i) { return desc.includes(i.name.toLowerCase()) || i.name.toLowerCase().includes(desc.split(' ')[0]); });
-  if (byName) return { ing: byName, confidence: 'medium' };
-  // Try category + first word
-  var firstWord = desc.split(' ')[0];
-  var byCat = ING.find(function(i) { return i.cat === item.inventory_category && i.name.toLowerCase().includes(firstWord); });
-  if (byCat) return { ing: byCat, confidence: 'low' };
+  // Then the ingredient whose name shares the most words with the description
+  var dw = matchWords(item.description);
+  if (!dw.length) return null;
+  var best = null, bestHits = 0, bestCover = 0;
+  ING.forEach(function(i) {
+    var nw = matchWords(i.name);
+    if (!nw.length) return;
+    var hits = nw.filter(function(w) { return dw.indexOf(w) >= 0; }).length;
+    if (!hits) return;
+    var cover = hits / nw.length;
+    if (hits > bestHits || (hits === bestHits && cover > bestCover)) { best = i; bestHits = hits; bestCover = cover; }
+  });
+  if (best) return { ing: best, confidence: (bestHits >= 2 || bestCover === 1) ? 'medium' : 'low' };
   return null;
+}
+
+// ── INVOICE REVIEW: every field can be corrected before prices are applied ──────
+var INVOICE_UNITS = ['each', 'kg', 'g', 'lb', 'case', 'pack', 'bag', 'box', 'bottle', 'can', 'bunch', 'dozen', 'head'];
+var INVOICE_CATEGORIES = ['Produce', 'Protein', 'Dairy', 'Dry Goods', 'Beverage', 'Bakery', 'Frozen', 'Chemical', 'Paper/Disposables', 'Other'];
+var WEIGHT_INVOICE_UNITS = ['kg', 'g', 'lb'];
+var INV_INPUT = 'border:1px solid #e5e7eb;border-radius:6px;padding:4px 6px;font-size:12px;outline:none;font-family:inherit;box-sizing:border-box;background:#fff';
+var currentInvoiceMeta = {};
+var invoiceSaveTimer = null;
+
+function normaliseInvoiceUnit(u) {
+  var s = String(u || '').trim().toLowerCase();
+  if (!s) return 'each';
+  var map = { ea: 'each', unit: 'each', units: 'each', pc: 'each', pcs: 'each', piece: 'each', kilogram: 'kg', kilograms: 'kg', kgs: 'kg',
+    lbs: 'lb', pound: 'lb', pounds: 'lb', cs: 'case', cases: 'case', ctn: 'case', carton: 'case', pk: 'pack', pkg: 'pack', package: 'pack',
+    btl: 'bottle', doz: 'dozen', bu: 'bunch', bx: 'box', bg: 'bag', cans: 'can' };
+  return map[s] || s;
+}
+
+function invEl(tag, css, text) {
+  var e = document.createElement(tag);
+  if (css) e.style.cssText = css;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+
+function invInput(type, value, width) {
+  var e = invEl('input', INV_INPUT + ';width:' + width);
+  e.type = type;
+  e.value = (value === null || value === undefined) ? '' : value;
+  if (type === 'number') { e.step = 'any'; e.min = '0'; }
+  return e;
+}
+
+function invSelect(options, value, width) {
+  var s = invEl('select', INV_INPUT + ';width:' + width);
+  options.forEach(function(o) {
+    var op = document.createElement('option');
+    op.value = o.value; op.textContent = o.label;
+    s.appendChild(op);
+  });
+  s.value = value;
+  return s;
+}
+
+// Which extra box (if any) is needed to turn this line's price into the catalog's unit
+function invoiceExtraSpec(item, match) {
+  if (!match) return null;
+  var invUnit = normaliseInvoiceUnit(item.unit);
+  if (WEIGHT_INVOICE_UNITS.indexOf(invUnit) >= 0) return null;
+  if (match.ing.unit === 'kg' || match.ing.unit === '100g') return { field: 'weight_kg', label: 'kg per ' + invUnit, step: '0.001', placeholder: 'kg' };
+  if (invUnit === 'each') return null;
+  return { field: 'pack_size', label: 'items per ' + invUnit, step: '1', placeholder: invUnit === 'dozen' ? '12' : 'qty' };
+}
+
+function invoiceLinePreview(item, ing) {
+  var np = invoicePriceForIngredient(item, ing, true);
+  if (np === null) {
+    if (ing.unit === 'kg' || ing.unit === '100g') return { text: 'Enter the kg per ' + normaliseInvoiceUnit(item.unit) + ' to convert to /kg', color: '#d97706' };
+    return { text: '', color: '#9ca3af' };
+  }
+  var unitLabel = ing.unit === 'kg' ? '/kg' : ing.unit === '100g' ? ' per 100g' : ' per ' + ing.unit;
+  var up = np > ing.price + 0.0001, down = np < ing.price - 0.0001;
+  return { text: 'Catalog ' + (up ? '↑' : down ? '↓' : '=') + ' $' + np.toFixed(2) + unitLabel + ' (now $' + ing.price.toFixed(2) + ')', color: up ? '#dc2626' : down ? '#16a34a' : '#9ca3af' };
+}
+
+function updateInvoiceRowDerived(tr, idx) {
+  var ui = tr._ui, item = parsedInvoiceData.line_items[idx];
+  if (!ui || !item) return;
+  var qty = parseFloat(item.quantity) || 0, price = parseFloat(item.unit_price) || 0;
+  item.extended_price = Math.round(qty * price * 100) / 100;
+  ui.total.textContent = '$' + item.extended_price.toFixed(2);
+  var special = !!(item.is_short || item.is_credit);
+  var match = matchIngredient(item);
+  ui.matchSel.value = match ? String(match.ing.id) : '';
+  if (special) { ui.status.textContent = 'Short/Credit'; ui.status.style.color = '#dc2626'; }
+  else if (match) { var sure = match.confidence === 'high' || match.confidence === 'manual'; ui.status.textContent = sure ? '● Matched' : '● Review'; ui.status.style.color = sure ? '#16a34a' : '#d97706'; }
+  else { ui.status.textContent = '○ No match'; ui.status.style.color = '#9ca3af'; }
+  var pv = (match && !special) ? invoiceLinePreview(item, match.ing) : { text: '', color: '#9ca3af' };
+  ui.preview.textContent = pv.text; ui.preview.style.color = pv.color;
+  var spec = special ? null : invoiceExtraSpec(item, match);
+  if (spec) {
+    ui.extraWrap.style.display = 'block'; ui.extraLabel.textContent = spec.label;
+    ui.extraInput.step = spec.step; ui.extraInput.placeholder = spec.placeholder;
+    ui.extraInput.value = item[spec.field] || '';
+  } else { ui.extraWrap.style.display = 'none'; }
+  ui.apply.style.display = (match && !special) ? 'inline-block' : 'none';
+}
+
+function buildInvoiceRow(item, idx) {
+  var tr = document.createElement('tr');
+  tr.style.cssText = 'vertical-align:top;' + ((item.is_short || item.is_credit) ? 'background:#fef9f9' : '');
+  var ui = {};
+  tr._ui = ui;
+  function cell(child) { var td = document.createElement('td'); td.style.cssText = 'padding:6px 8px'; if (child) td.appendChild(child); tr.appendChild(td); return td; }
+  function changed() { updateInvoiceRowDerived(tr, idx); renderUnmatched(); queueInvoiceSave(); }
+
+  cell(invEl('span', 'font-family:monospace;font-size:10px;color:#9ca3af', item.sku || '—'));
+
+  ui.desc = invInput('text', item.description || '', '100%');
+  ui.desc.style.minWidth = '160px';
+  ui.desc.addEventListener('change', function() { item.description = ui.desc.value.trim(); changed(); });
+  cell(ui.desc);
+
+  ui.cat = invSelect(INVOICE_CATEGORIES.map(function(c) { return { value: c, label: c }; }), reportCategory(item.inventory_category), '118px');
+  ui.cat.addEventListener('change', function() { item.inventory_category = ui.cat.value; changed(); });
+  cell(ui.cat);
+
+  ui.qty = invInput('number', item.quantity, '64px');
+  ui.qty.addEventListener('change', function() { item.quantity = parseFloat(ui.qty.value) || 0; changed(); });
+  cell(ui.qty);
+
+  var unitNow = normaliseInvoiceUnit(item.unit);
+  var unitList = INVOICE_UNITS.indexOf(unitNow) >= 0 ? INVOICE_UNITS : INVOICE_UNITS.concat([unitNow]);
+  ui.unit = invSelect(unitList.map(function(u) { return { value: u, label: u }; }), unitNow, '86px');
+  ui.unit.addEventListener('change', function() { item.unit = ui.unit.value; item.price_per_kg = null; changed(); });
+  ui.extraWrap = invEl('div', 'margin-top:4px;display:none;font-size:10px;color:#6b7280');
+  ui.extraLabel = invEl('div', 'margin-bottom:2px');
+  ui.extraInput = invInput('number', '', '86px');
+  ui.extraInput.addEventListener('change', function() {
+    var spec = invoiceExtraSpec(item, matchIngredient(item));
+    if (spec) { var v = parseFloat(ui.extraInput.value); item[spec.field] = v > 0 ? v : null; item.price_per_kg = null; }
+    changed();
+  });
+  ui.extraWrap.appendChild(ui.extraLabel); ui.extraWrap.appendChild(ui.extraInput);
+  var unitTd = cell(ui.unit); unitTd.appendChild(ui.extraWrap);
+
+  ui.price = invInput('number', item.unit_price, '80px');
+  ui.price.addEventListener('change', function() { item.unit_price = parseFloat(ui.price.value) || 0; item.price_per_kg = null; changed(); });
+  var priceTd = cell(ui.price);
+  var tdp = parseFloat(item.tdp_discount) || 0;
+  if (tdp > 0) priceTd.appendChild(invEl('div', 'font-size:10px;color:#16a34a;margin-top:3px', 'after $' + tdp.toFixed(2) + ' TDP'));
+
+  ui.total = invEl('span', 'color:#6b7280;font-size:12px');
+  cell(ui.total);
+
+  var sorted = ING.slice().sort(function(a, b) { return a.name.localeCompare(b.name); });
+  ui.matchSel = invSelect([{ value: '', label: '— no match —' }].concat(sorted.map(function(i) { return { value: String(i.id), label: i.name }; })), '', '170px');
+  ui.matchSel.addEventListener('change', function() { setInvoiceMatch(idx, ui.matchSel.value); });
+  ui.status = invEl('div', 'font-size:11px;margin-top:3px');
+  ui.preview = invEl('div', 'font-size:10px;margin-top:2px;max-width:200px');
+  var matchTd = cell(ui.matchSel); matchTd.appendChild(ui.status); matchTd.appendChild(ui.preview);
+
+  ui.apply = invEl('button', 'background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:3px 8px;font-size:11px;color:#16a34a;cursor:pointer', 'Apply');
+  ui.apply.id = 'apply-btn-' + idx;
+  ui.apply.setAttribute('onclick', 'applyInvoiceItem(' + idx + ')');
+  cell(ui.apply);
+
+  var del = invEl('button', 'background:none;border:none;color:#dc2626;font-size:14px;cursor:pointer;padding:2px 6px', '✕');
+  del.title = 'Remove this line';
+  del.addEventListener('click', function() { removeInvoiceLine(idx); });
+  cell(del);
+  return tr;
+}
+
+function setInvoiceMatch(idx, value) {
+  var item = parsedInvoiceData && parsedInvoiceData.line_items[idx];
+  if (!item) return;
+  item._matchId = value ? parseInt(value, 10) : 0;
+  var body = document.getElementById('invoice-items-table');
+  var tr = body && body.children[idx];
+  if (tr && tr._ui) updateInvoiceRowDerived(tr, idx);
+  renderUnmatched();
+  queueInvoiceSave();
+}
+
+function renderUnmatched() {
+  var list = document.getElementById('unmatched-list'), section = document.getElementById('unmatched-section');
+  if (!list || !section || !parsedInvoiceData) return;
+  list.innerHTML = '';
+  var items = parsedInvoiceData.line_items || [], count = 0;
+  items.forEach(function(item, idx) {
+    if (item.is_short || item.is_credit || matchIngredient(item)) return;
+    count++;
+    var row = invEl('div', 'display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f9fafb;font-size:12px;flex-wrap:wrap');
+    row.appendChild(invEl('span', 'flex:1;font-weight:500;min-width:160px', item.description || '(no description)'));
+    row.appendChild(invEl('span', 'color:#6b7280', '$' + (parseFloat(item.unit_price) || 0).toFixed(2) + ' / ' + normaliseInvoiceUnit(item.unit)));
+    var sel = invSelect([{ value: '', label: '— Link to ingredient —' }].concat(ING.slice().sort(function(a, b) { return a.name.localeCompare(b.name); }).map(function(i) { return { value: String(i.id), label: i.name }; })), '', '190px');
+    sel.addEventListener('change', function() { if (sel.value) setInvoiceMatch(idx, sel.value); });
+    row.appendChild(sel);
+    var add = invEl('button', 'background:#f3f4f6;border:none;border-radius:6px;padding:4px 10px;font-size:11px;color:#374151;cursor:pointer', 'Add new');
+    add.addEventListener('click', function() { addAsNewIngredient(idx); });
+    row.appendChild(add);
+    list.appendChild(row);
+  });
+  section.style.display = count ? 'block' : 'none';
+}
+
+function updateInvoiceHeader() {
+  var d = parsedInvoiceData || {};
+  document.getElementById('inv-vendor-name').textContent = d.vendor_name || 'Unknown Vendor';
+  var total = cleanInvoiceAmount(d.total_amount);
+  document.getElementById('inv-meta-line').textContent = [
+    d.invoice_number ? 'Invoice #' + d.invoice_number : null,
+    d.invoice_date || null,
+    total !== null ? '$' + total.toFixed(2) + ' total' : null,
+    (d.line_items || []).length + ' line items'
+  ].filter(Boolean).join(' · ');
+  document.getElementById('inv-item-count').textContent = '(' + (d.line_items || []).length + ' items)';
+}
+
+function renderInvoiceHeaderFields() {
+  var box = document.getElementById('inv-header-fields');
+  if (!box || !parsedInvoiceData) return;
+  box.innerHTML = '';
+  var d = parsedInvoiceData;
+  function field(label, type, value, width, apply) {
+    var wrap = invEl('div', 'font-size:10px;color:#6b7280');
+    wrap.appendChild(invEl('div', 'margin-bottom:3px', label));
+    var input = invInput(type, value, width);
+    input.addEventListener('change', function() { apply(input.value); updateInvoiceHeader(); queueInvoiceSave(); });
+    wrap.appendChild(input);
+    box.appendChild(wrap);
+  }
+  field('Vendor', 'text', d.vendor_name || '', '210px', function(v) { d.vendor_name = v.trim(); });
+  field('Invoice #', 'text', d.invoice_number || '', '120px', function(v) { d.invoice_number = v.trim(); });
+  field('Date', 'date', cleanInvoiceDate(d.invoice_date) || '', '140px', function(v) { d.invoice_date = v; });
+  field('Invoice total', 'number', cleanInvoiceAmount(d.total_amount), '110px', function(v) { d.total_amount = v === '' ? null : parseFloat(v); });
+  box.appendChild(invEl('div', 'font-size:11px;color:#6b7280;align-self:center;max-width:300px', 'Compare with the scan (View scan) and fix anything that was misread. Changes save automatically.'));
+  box.appendChild(invEl('div', 'font-size:11px;font-weight:600;color:#16a34a;align-self:center', '')).id = 'inv-save-note';
+}
+
+function updateViewScanButton() {
+  var btn = document.getElementById('inv-view-scan-btn');
+  if (btn) btn.style.display = currentInvoiceMeta && currentInvoiceMeta._scan_url ? 'inline-block' : 'none';
+}
+
+function openCurrentScan() {
+  if (currentInvoiceMeta && currentInvoiceMeta._scan_url) window.open(currentInvoiceMeta._scan_url, '_blank');
 }
 
 function renderInvoiceReview(data, fileName) {
   document.getElementById('invoice-parsing-status').style.display = 'none';
   document.getElementById('invoice-review').style.display = 'block';
-  document.getElementById('inv-vendor-name').textContent = data.vendor_name || 'Unknown Vendor';
-  document.getElementById('inv-meta-line').textContent = [
-    data.invoice_number ? 'Invoice #' + data.invoice_number : null,
-    data.invoice_date || null,
-    data.total_amount ? '$' + parseFloat(data.total_amount).toFixed(2) + ' total' : null,
-    (data.line_items || []).length + ' line items'
-  ].filter(Boolean).join(' · ');
-  document.getElementById('inv-item-count').textContent = '(' + (data.line_items||[]).length + ' items)';
-
-  var items = data.line_items || [];
-  var unmatched = [];
-
-  document.getElementById('invoice-items-table').innerHTML = items.map(function(item, idx) {
-    var match = matchIngredient(item);
-    var statusDot = item.is_short || item.is_credit
-      ? '<span style="color:#dc2626;font-weight:600">Short/CR</span>'
-      : match
-        ? match.confidence === 'high'
-          ? '<span style="color:#16a34a">● Matched</span>'
-          : '<span style="color:#d97706">● Review</span>'
-        : '<span style="color:#9ca3af">○ New</span>';
-
-    if (!match && !item.is_short && !item.is_credit) unmatched.push({ item: item, idx: idx });
-
-    var matchName = match ? match.ing.name : '—';
-    var netPrice = parseFloat(item.unit_price);
-    var tdp = parseFloat(item.tdp_discount) || 0;
-    var grossPrice = parseFloat(item.gross_price) || netPrice;
-    var priceChanged = match && match.ing.price !== netPrice;
-    var priceDisplay = '$' + netPrice.toFixed(2);
-    if (tdp > 0) {
-      priceDisplay = '<span style="text-decoration:line-through;color:#9ca3af;font-size:10px">$'+grossPrice.toFixed(2)+'</span> <span style="color:#16a34a;font-weight:600">$'+netPrice.toFixed(2)+'</span> <span style="font-size:10px;color:#16a34a">-$'+tdp.toFixed(2)+' TDP</span>';
-    } else if (priceChanged && match) {
-      priceDisplay += ' <span style="font-size:10px;color:'+(netPrice > match.ing.price?'#dc2626':'#16a34a')+'">'+(netPrice > match.ing.price?'↑':'↓')+' was $'+match.ing.price.toFixed(2)+'</span>';
-    }
-
-    return '<tr style="background:'+(item.is_short||item.is_credit?'#fef9f9':'')+'">'+
-      '<td style="font-family:monospace;font-size:10px;color:#9ca3af">'+(item.sku||'—')+'</td>'+
-      '<td style="font-weight:500;font-size:12px">'+item.description+'</td>'+
-      '<td><span class="vendor-pill">'+item.inventory_category+'</span></td>'+
-      '<td style="color:#6b7280">'+item.quantity+'</td>'+
-      '<td>'+priceDisplay+'</td>'+
-      '<td style="color:#6b7280">'+(item.extended_price?'$'+parseFloat(item.extended_price).toFixed(2):'—')+'</td>'+
-      '<td style="font-size:11px">'+statusDot+'<br><span style="color:#9ca3af">'+matchName+'</span></td>'+
-      '<td>'+
-        (match && !item.is_short && !item.is_credit
-          ? '<button onclick="applyInvoiceItem('+idx+')" style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:3px 8px;font-size:11px;color:#16a34a;cursor:pointer" id="apply-btn-'+idx+'">Apply</button>'
-          : item.is_short ? '<span style="font-size:10px;color:#dc2626">Short</span>' : '—')+
-      '</td>'+
-    '</tr>';
-  }).join('');
-
-  // Unmatched section
-  if (unmatched.length > 0) {
-    document.getElementById('unmatched-section').style.display = 'block';
-    document.getElementById('unmatched-list').innerHTML = unmatched.map(function(u) {
-      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #f9fafb;font-size:12px">'+
-        '<span style="flex:1;font-weight:500">'+u.item.description+'</span>'+
-        '<span style="color:#6b7280">$'+parseFloat(u.item.unit_price).toFixed(2)+'/'+u.item.unit+'</span>'+
-        '<select onchange="linkInvoiceItem('+u.idx+',this.value)" style="border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;font-size:11px;max-width:180px;outline:none">'+
-          '<option value="">— Link to ingredient —</option>'+
-          ING.map(function(i){ return '<option value="'+i.id+'">'+i.name+'</option>'; }).join('')+
-        '</select>'+
-        '<button onclick="addAsNewIngredient('+u.idx+')" style="background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:3px 8px;font-size:11px;color:#374151;cursor:pointer">Add new</button>'+
-      '</div>';
-    }).join('');
-  } else {
-    document.getElementById('unmatched-section').style.display = 'none';
-  }
+  updateInvoiceHeader();
+  var body = document.getElementById('invoice-items-table');
+  body.innerHTML = '';
+  (data.line_items || []).forEach(function(item, idx) {
+    var tr = buildInvoiceRow(item, idx);
+    body.appendChild(tr);
+    updateInvoiceRowDerived(tr, idx);
+  });
+  renderUnmatched();
+  renderInvoiceHeaderFields();
+  updateViewScanButton();
 }
 
-function invoicePriceForIngredient(item, ing) {
+function addInvoiceLine() {
+  if (!parsedInvoiceData) return;
+  parsedInvoiceData.line_items = parsedInvoiceData.line_items || [];
+  parsedInvoiceData.line_items.push({ sku: '', description: '', quantity: 1, unit_price: 0, extended_price: 0, unit: 'each', inventory_category: 'Other', is_short: false, is_credit: false });
+  renderInvoiceReview(parsedInvoiceData);
+  queueInvoiceSave();
+}
+
+function removeInvoiceLine(idx) {
+  if (!parsedInvoiceData || !parsedInvoiceData.line_items[idx]) return;
+  if (!confirm('Remove this line from the invoice?')) return;
+  parsedInvoiceData.line_items.splice(idx, 1);
+  renderInvoiceReview(parsedInvoiceData);
+  queueInvoiceSave();
+}
+
+// Saves corrections to the stored invoice a moment after the last change
+function queueInvoiceSave() {
+  if (!sb || !isAdmin() || !currentInvoiceRowId || !parsedInvoiceData) return;
+  clearTimeout(invoiceSaveTimer);
+  invoiceSaveTimer = setTimeout(saveInvoiceEdits, 700);
+}
+
+function saveInvoiceEdits() {
+  var d = parsedInvoiceData, id = currentInvoiceRowId;
+  if (!sb || !isAdmin() || !id || !d) return;
+  sb.from('invoices').update({
+    vendor: d.vendor_name || 'Unknown',
+    invoice_number: d.invoice_number ? String(d.invoice_number) : null,
+    invoice_date: cleanInvoiceDate(d.invoice_date),
+    total_amount: cleanInvoiceAmount(d.total_amount),
+    raw_json: Object.assign({}, d, currentInvoiceMeta)
+  }).eq('id', id).then(function(res) {
+    if (res && res.error) { showSaveToast('Could not save your corrections: ' + res.error.message, '#dc2626'); return; }
+    var note = document.getElementById('inv-save-note');
+    if (note) { note.textContent = 'Corrections saved'; setTimeout(function() { if (note) note.textContent = ''; }, 2500); }
+    initInvoicePage();
+  });
+}
+
+// Re-opens a saved invoice so it can be checked, corrected and applied later
+function loadInvoiceForEdit(id) {
+  if (!requireAdmin()) return;
+  sb.from('invoices').select('id,vendor,invoice_number,invoice_date,total_amount,raw_json').eq('id', id).single().then(function(res) {
+    if (!res || res.error || !res.data) { showSaveToast('Could not open that invoice', '#dc2626'); return; }
+    var raw = res.data.raw_json || {}, data = {}, meta = {};
+    Object.keys(raw).forEach(function(k) { if (k.charAt(0) === '_') meta[k] = raw[k]; else data[k] = raw[k]; });
+    data.vendor_name = data.vendor_name || res.data.vendor;
+    data.invoice_number = data.invoice_number || res.data.invoice_number;
+    data.invoice_date = data.invoice_date || res.data.invoice_date;
+    if (data.total_amount === undefined || data.total_amount === null) data.total_amount = res.data.total_amount;
+    data.line_items = data.line_items || [];
+    parsedInvoiceData = data; currentInvoiceRowId = res.data.id; currentInvoiceMeta = meta;
+    window._currentInvoiceDataUrl = null;
+    document.getElementById('invoice-dropzone').style.display = 'none';
+    document.getElementById('invoice-parsing-status').style.display = 'none';
+    renderInvoiceReview(data, '');
+    var top = document.getElementById('invoice-review');
+    if (top && top.scrollIntoView) top.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function invoicePriceForIngredient(item, ing, noPrompt) {
   var price = parseFloat(item.unit_price);
   if (!(price > 0)) return null;
   var unit = (ing.unit || "").toLowerCase();
-  // Items counted by the each, can, bottle, bag etc. keep the invoice price per item
-  if (unit !== "kg" && unit !== "100g") return price;
-  // Weight-priced ingredient: work out the price per kg first
+  var invUnit = normaliseInvoiceUnit(item.unit);
+  // Catalog item counted by the each, can, bottle, bag etc.: divide a case or pack price by what it holds
+  if (unit !== "kg" && unit !== "100g") {
+    var per = parseFloat(item.pack_size) > 0 ? parseFloat(item.pack_size) : (invUnit === 'dozen' ? 12 : 1);
+    return Math.round(price / per * 10000) / 10000;
+  }
+  // Weight-priced catalog item: work out the price per kg first
   var perKg = null;
-  var invUnit = (item.unit || "").toString().toLowerCase();
   if (parseFloat(item.price_per_kg) > 0) {
     perKg = parseFloat(item.price_per_kg);
-  } else if (parseFloat(item.weight_kg) > 0) {
-    perKg = price / parseFloat(item.weight_kg);
   } else if (invUnit === "kg") {
     perKg = price;
   } else if (invUnit === "lb") {
     perKg = price * 2.20462;
+  } else if (invUnit === "g") {
+    perKg = price * 1000;
+  } else if (parseFloat(item.weight_kg) > 0) {
+    perKg = price / parseFloat(item.weight_kg);
   }
   if (perKg === null) {
-    var answer = window.prompt(ing.name + ": the invoice shows $" + price.toFixed(2) + " for the whole item. How many kg is it? Press Cancel to skip this item.");
+    if (noPrompt) return null;
+    var answer = window.prompt(ing.name + ": the invoice shows $" + price.toFixed(2) + " per " + invUnit + ". How many kg is one " + invUnit + "? Press Cancel to skip this item.");
     var kg = parseFloat(answer);
     if (!(kg > 0)) return null;
+    item.weight_kg = kg;
     perKg = price / kg;
   }
   var result = unit === "100g" ? perKg / 10 : perKg;
@@ -3999,10 +4265,11 @@ function approveAllInvoiceItems() {
     var rowId = currentInvoiceRowId;
     sb.from('invoices').select('raw_json').eq('id', rowId).single().then(function(r) {
       var raw = Object.assign({}, (r.data && r.data.raw_json) || {}, parsedInvoiceData, { _status: 'applied', _applied_at: new Date().toISOString(), _prices_updated: updated });
-      return sb.from('invoices').update({ raw_json: raw }).eq('id', rowId);
+      var d = parsedInvoiceData;
+      return sb.from('invoices').update({ vendor: d.vendor_name || 'Unknown', invoice_number: d.invoice_number ? String(d.invoice_number) : null, invoice_date: cleanInvoiceDate(d.invoice_date), total_amount: cleanInvoiceAmount(d.total_amount), raw_json: Object.assign({}, raw, currentInvoiceMeta, { _status: 'applied' }) }).eq('id', rowId);
     }).then(function(res) {
       if (res && res.error) { showSaveToast('Prices applied, but the invoice record could not be updated: ' + res.error.message, '#d97706'); return; }
-      currentInvoiceRowId = null;
+      currentInvoiceMeta._status = 'applied';
       showSaveToast('Prices applied and the invoice record is updated', '#16a34a');
       initInvoicePage();
     });
@@ -4057,42 +4324,36 @@ function approveAllInvoiceItems() {
 
 function linkInvoiceItem(idx, ingId) {
   if (!requireAdmin()) return;
-  if (!ingId) return;
-  var item = parsedInvoiceData.line_items[idx];
-  var ing = ING.find(function(i){ return i.id === parseInt(ingId); });
-  if (!ing) return;
-  var linkedPrice = invoicePriceForIngredient(item, ing);
-  if (linkedPrice === null) return;
-  if (ing.price !== linkedPrice) {
-    ing.prev = ing.price;
-    ing.price = linkedPrice;
-    ORIGINAL_PRICES[ing.id] = linkedPrice;
-    ing.sku = item.sku || ing.sku;
-    ing._edited = true;
-    saveIngredientToDb(ing);
-    showSaveToast(ing.name + ' linked and updated to $' + ing.price.toFixed(2), '#16a34a');
-  }
+  setInvoiceMatch(idx, ingId);
 }
 
 function addAsNewIngredient(idx) {
   if (!requireAdmin()) return;
   var item = parsedInvoiceData.line_items[idx];
   var newId = Math.max.apply(null, ING.map(function(i){ return i.id; })) + 1;
+  var u = normaliseInvoiceUnit(item.unit), price = parseFloat(item.unit_price) || 0, catUnit = u;
+  if (u === 'lb') { catUnit = 'kg'; price = price * 2.20462; }
+  else if (u === 'g') { catUnit = 'kg'; price = price * 1000; }
+  else if (WEIGHT_INVOICE_UNITS.indexOf(u) < 0 && parseFloat(item.weight_kg) > 0) { catUnit = 'kg'; price = price / parseFloat(item.weight_kg); }
+  price = Math.round(price * 10000) / 10000;
   var newIng = {
     id: newId, sku: item.sku || '—', name: item.description,
     vendor: parsedInvoiceData.vendor_name || 'Market',
-    cat: item.inventory_category || 'Other', unit: item.unit || 'each',
-    price: parseFloat(item.unit_price), prev: parseFloat(item.unit_price), _edited: true
+    cat: reportCategory(item.inventory_category), unit: catUnit,
+    price: price, prev: price, _edited: true
   };
   ING.push(newIng);
+  ORIGINAL_PRICES[newId] = price;
   saveIngredientToDb(newIng);
   showSaveToast(newIng.name + ' added to catalog', '#16a34a');
-  renderIngredients && renderIngredients();
+  if (typeof renderIngredients === 'function') renderIngredients();
+  setInvoiceMatch(idx, String(newId));
 }
 
 function resetInvoiceUpload() {
   parsedInvoiceData = null;
   currentInvoiceRowId = null;
+  currentInvoiceMeta = {};
   document.getElementById('invoice-dropzone').style.display = 'block';
   document.getElementById('invoice-parsing-status').style.display = 'none';
   document.getElementById('invoice-review').style.display = 'none';
