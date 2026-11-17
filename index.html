@@ -1187,6 +1187,16 @@ function syncFromSupabase() {
           existing.packQty=row.case_size||null;
           existing.packWeight=row.pack_weight||null;
           existing.packWeightUnit=row.pack_weight_unit||'kg';
+        } else {
+          // Ingredient added after the built-in list (invoice scan, new house-made item): load it too
+          var np = parseFloat(row.price) || 0;
+          ING.push({
+            id:row.id, sku:row.sku||'—', name:row.name, vendor:row.vendor||'Market',
+            cat:row.category, unit:row.unit, price:np, prev:parseFloat(row.prev_price)||np,
+            _edited:row.edited,
+            packQty:row.case_size||null, packWeight:row.pack_weight||null, packWeightUnit:row.pack_weight_unit||'kg'
+          });
+          ORIGINAL_PRICES[row.id] = np;
         }
       });
     } else { seedIngredients(); }
